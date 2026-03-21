@@ -77,6 +77,7 @@
     let boardObserver = null;
     let notifiedGameDetected = false;
     let contextValid = true;
+    let userSide = '';  // 'X' or 'O' — detected from footer DOM
 
     // Safe wrapper — detects "Extension context invalidated" and stops all activity
     function safeSendMessage(msg) {
@@ -95,7 +96,23 @@
       if (boardObserver) { boardObserver.disconnect(); boardObserver = null; }
       if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
       if (autoTimerId) { clearTimeout(autoTimerId); autoTimerId = null; }
+      if (fullAutoInterval) { clearInterval(fullAutoInterval); fullAutoInterval = null; }
       clearHighlight();
+    }
+
+    // ─── User side detection ───
+    // Footer (bottom) always shows the current user
+    // .playerInfo__color img alt="b"/src="black.svg" → X, alt="w"/src="white.svg" → O
+    function detectUserSide() {
+      const footer = document.querySelector('.match-board__footer');
+      if (!footer) return '';
+      const colorImg = footer.querySelector('.playerInfo__color img');
+      if (!colorImg) return '';
+      const alt = (colorImg.getAttribute('alt') || '').toLowerCase();
+      const src = (colorImg.getAttribute('src') || '').toLowerCase();
+      if (alt === 'b' || src.includes('black')) return 'X';
+      if (alt === 'w' || src.includes('white')) return 'O';
+      return '';
     }
 
     // ─── Board detection ───
@@ -180,7 +197,34 @@
       return moves;
     }
 
+    // ─── Wall pattern for out-of-bounds columns/rows ───
+    // Double-row checkerboard: max 2 consecutive same color in any direction
+    // Formula: rows 0,3,4,7,8,11… → ■□■□ ; rows 1,2,5,6,9,10… → □■□■
+    function buildWallMoves(cols, rows, apiSize) {
+      const xWalls = [];
+      const oWalls = [];
+      for (let y = 0; y < apiSize; y++) {
+        for (let x = 0; x < apiSize; x++) {
+          if (x < cols && y < rows) continue; // real board area — skip
+          const flip = (y % 4 === 1 || y % 4 === 2) ? 1 : 0;
+          const player = ((x + flip) % 2 === 0) ? 1 : 2;
+          if (player === 1) xWalls.push({ x, y, player: 1 });
+          else oWalls.push({ x, y, player: 2 });
+        }
+      }
+      // Interleave X/O
+      const walls = [];
+      const maxLen = Math.max(xWalls.length, oWalls.length);
+      for (let i = 0; i < maxLen; i++) {
+        if (i < xWalls.length) walls.push(xWalls[i]);
+        if (i < oWalls.length) walls.push(oWalls[i]);
+      }
+      return walls;
+    }
+
     // ─── Core: analyze current board ───
+    let lastSnap = null; // stored for wall-retry
+
     function analyzeBoard() {
       if (!contextValid || analysisInFlight) return;
 
@@ -191,13 +235,24 @@
       if (snapKey === prevSnapshotKey) return; // no change
       prevSnapshotKey = snapKey;
 
+      sendAnalysis(snap, false);
+    }
+
+    function sendAnalysis(snap, withWalls) {
+      lastSnap = snap;
+
       const { x, o } = countStones(snap);
       const turn = (x === o) ? 'X' : 'O'; // X goes first
-      const moves = buildMovesFromBoard(snap);
-      const boardSize = Math.min(boardRows, boardCols);
+      const apiSize = Math.max(boardRows, boardCols);
+      let moves = buildMovesFromBoard(snap);
+
+      if (withWalls) {
+        moves = [...moves, ...buildWallMoves(boardCols, boardRows, apiSize)];
+      }
 
       console.log('[BM][gomoku] Board changed — X:', x, 'O:', o,
-        'turn:', turn, 'board:', boardCols + 'x' + boardRows, 'apiSize:', boardSize);
+        'turn:', turn, 'board:', boardCols + 'x' + boardRows, 'apiSize:', apiSize,
+        withWalls ? '(with walls)' : '');
 
       // Clear old hint when board changes
       clearHighlight();
@@ -206,10 +261,11 @@
       analysisInFlight = true;
       safeSendMessage({
         command: 'analyzeGomoku',
-        boardSize: boardSize,
+        boardSize: apiSize,
         moves: moves,
         turn: turn,
         platform: platform,
+        isRetry: withWalls,
       });
     }
 
@@ -309,6 +365,88 @@
       return true;
     }
 
+    // ─── Full Auto Loop ───
+    let fullAutoInterval = null;
+
+    function startFullAuto() {
+      if (fullAutoInterval) return;
+      autoMode = true;
+      console.log('[BM][gomoku] Full auto started');
+      safeSendMessage({ command: 'autoStatus', status: 'running' });
+      fullAutoTick(); // run immediately
+      fullAutoInterval = setInterval(fullAutoTick, 2000);
+    }
+
+    function stopFullAuto() {
+      autoMode = false;
+      if (fullAutoInterval) { clearInterval(fullAutoInterval); fullAutoInterval = null; }
+      if (autoTimerId) { clearTimeout(autoTimerId); autoTimerId = null; }
+      console.log('[BM][gomoku] Full auto stopped');
+      safeSendMessage({ command: 'autoStatus', status: 'stopped' });
+    }
+
+    function detectPageState() {
+      const mainMenu = document.querySelector('.main-menu');
+      const gameEndFooter = document.querySelector('.footer .actions');
+      const board = findBoard();
+
+      if (gameEndFooter && gameEndFooter.querySelectorAll('.action').length > 0) {
+        return 'game-over';
+      }
+      if (board) {
+        return 'playing';
+      }
+      if (mainMenu) {
+        return 'lobby';
+      }
+      return 'searching';
+    }
+
+    function fullAutoTick() {
+      if (!contextValid) { stopFullAuto(); return; }
+
+      const pageState = detectPageState();
+
+      switch (pageState) {
+        case 'lobby': {
+          console.log('[BM][gomoku][auto] In lobby — clicking Play Now');
+          userSide = ''; // reset — new match may assign different side
+          safeSendMessage({ command: 'autoStatus', status: 'lobby' });
+          const playBtn = document.querySelector('.main-menu .button.big');
+          if (playBtn) playBtn.click();
+          break;
+        }
+
+        case 'searching':
+          console.log('[BM][gomoku][auto] Searching for match…');
+          safeSendMessage({ command: 'autoStatus', status: 'searching' });
+          break;
+
+        case 'playing':
+          // Retry user side detection if not yet known
+          if (!userSide) {
+            const detected = detectUserSide();
+            if (detected) {
+              userSide = detected;
+              console.log('[BM][gomoku][auto] User plays:', userSide);
+            }
+          }
+          // Auto-play is handled by analyzeBoard + scheduleAutoPlay
+          safeSendMessage({ command: 'autoStatus', status: 'playing' });
+          break;
+
+        case 'game-over': {
+          console.log('[BM][gomoku][auto] Game over — clicking Exit');
+          safeSendMessage({ command: 'autoStatus', status: 'game-over' });
+          const actions = document.querySelectorAll('.footer .actions .action');
+          // Exit = last .action (no .highlight, no .re-match)
+          const exitBtn = actions[actions.length - 1];
+          if (exitBtn) exitBtn.click();
+          break;
+        }
+      }
+    }
+
     // ─── Auto-play ───
     function clickCell(x, y) {
       boardEl = findBoard();
@@ -319,14 +457,30 @@
       const cell = rowEls[y]?.children[x];
       if (!cell || readCell(cell) !== 0) return;
 
+      // First click: select the cell
       cell.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
       cell.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
       cell.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-      console.log('[BM][gomoku] Auto-played at', x, y);
+      console.log('[BM][gomoku] Auto-play select at', x, y);
+
+      // Second click after short delay: confirm the move
+      setTimeout(() => {
+        cell.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+        cell.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+        cell.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        console.log('[BM][gomoku] Auto-play confirm at', x, y);
+      }, 300);
     }
 
     function scheduleAutoPlay(x, y) {
       if (autoTimerId) clearTimeout(autoTimerId);
+
+      // Only auto-play on user's turn
+      if (userSide && currentTurn !== userSide) {
+        console.log('[BM][gomoku] Not user turn (' + currentTurn + ' vs ' + userSide + ') — skip auto-play');
+        return;
+      }
+
       chrome.storage.local.get('boardMasterState', (result) => {
         const delay = result.boardMasterState?.gomokuSettings?.autoDelay || 1000;
         autoTimerId = setTimeout(() => { if (autoMode) clickCell(x, y); }, delay);
@@ -360,7 +514,17 @@
       prevSnapshotKey = '';
 
       setupBoardObserver();
-      analyzeBoard();
+
+      // Delay before first analysis — let the board render fully
+      setTimeout(() => {
+        // Detect which side user plays (footer may take time to render)
+        const detected = detectUserSide();
+        if (detected) {
+          userSide = detected;
+          console.log('[BM][gomoku] User plays:', userSide);
+        }
+        analyzeBoard();
+      }, 2000);
     }
 
     // Try to find board immediately
@@ -403,9 +567,11 @@
     }, 3000);
 
     // ─── Message listener ───
+    const alwaysAllowed = new Set(['ping', 'startAuto', 'stopAuto', 'toggleHints']);
     chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       // Only handle game messages in the frame that actually has the board
-      if (msg.command !== 'ping' && !boardEl && !findBoard()) {
+      // But always allow control commands (auto, hints, ping) through
+      if (!alwaysAllowed.has(msg.command) && !boardEl && !findBoard()) {
         return;
       }
 
@@ -418,8 +584,18 @@
         case 'updateGomokuHints':
           analysisInFlight = false;
           if (msg.turn) currentTurn = msg.turn;
-          console.log('[BM][gomoku] Hint received:', msg.move, 'turn:', currentTurn, 'engine:', msg.engineTime);
+          console.log('[BM][gomoku] Hint received:', msg.move, 'turn:', currentTurn, 'engine:', msg.engineTime,
+            msg.isRetry ? '(wall retry)' : '');
+
           if (msg.move && boardCols > 0 && boardRows > 0) {
+            // Check if hint is outside the real board
+            if (!msg.isRetry && (msg.move.x >= boardCols || msg.move.y >= boardRows)) {
+              console.log('[BM][gomoku] Hint outside board (' + msg.move.x + ',' + msg.move.y +
+                ') — retrying with walls');
+              if (lastSnap) sendAnalysis(lastSnap, true);
+              break;
+            }
+
             const mx = Math.min(msg.move.x, boardCols - 1);
             const my = Math.min(msg.move.y, boardRows - 1);
             highlightCell(mx, my);
@@ -436,14 +612,18 @@
           break;
 
         case 'startAuto':
-          autoMode = true;
-          console.log('[BM][gomoku] Auto mode ON');
+          startFullAuto();
+          // If already have a hint, play it immediately
+          if (suggestedMove && findBoard()) {
+            scheduleAutoPlay(suggestedMove.x, suggestedMove.y);
+          }
+          // Force re-analyze even if board hasn't changed
+          prevSnapshotKey = '';
           analyzeBoard();
           break;
 
         case 'stopAuto':
-          autoMode = false;
-          if (autoTimerId) { clearTimeout(autoTimerId); autoTimerId = null; }
+          stopFullAuto();
           break;
 
         case 'toggleHints':

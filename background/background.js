@@ -84,6 +84,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               turn: msg.turn || 'X',
               engineTime: (apiResult.engineTime || 0) + 'ms',
               totalMoves: msg.moves?.length || 0,
+              isRetry: msg.isRetry || false,
             };
             safeSend(update);
             if (sender.tab?.id) {
