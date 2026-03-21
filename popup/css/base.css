@@ -1,0 +1,84 @@
+/* ─── Variables & Reset ─── */
+:root {
+  --bg: #ffffff;
+  --fg: #1a1a2e;
+  --border: #e2e8f0;
+  --accent: #4f46e5;
+  --input-bg: #f8fafc;
+  --input-fg: #1a1a2e;
+  --input-border: #cbd5e1;
+  --btn-bg: #4f46e5;
+  --btn-fg: #ffffff;
+  --btn-hover: #4338ca;
+  --btn-secondary-bg: #f1f5f9;
+  --btn-secondary-fg: #475569;
+  --btn-secondary-hover: #e2e8f0;
+  --success: #10b981;
+  --warning: #f59e0b;
+  --error: #ef4444;
+  --gold: #eab308;
+  --silver: #94a3b8;
+  --bronze: #d97706;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  width: 340px;
+  min-height: 200px;
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  font-size: 13px;
+  color: var(--fg);
+  background: var(--bg);
+  line-height: 1.4;
+}
+
+/* ─── Layout ─── */
+.view { display: none; flex-direction: column; }
+.view.active { display: flex; }
+
+.header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600; font-size: 13px;
+  background: #f8fafc;
+}
+.header-left { display: flex; align-items: center; gap: 6px; }
+.header-right {
+  font-size: 11px; font-weight: 400;
+  opacity: 0.75; display: flex; align-items: center; gap: 4px;
+}
+
+.section {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.section:last-child { border-bottom: none; }
+
+.section-title {
+  font-size: 10px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.8px;
+  opacity: 0.6; margin-bottom: 8px;
+}
+
+/* ─── Status ─── */
+.status { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.status-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  display: inline-block; flex-shrink: 0;
+}
+.status-dot.connected { background: var(--success); }
+.status-dot.disconnected { background: var(--error); opacity: 0.5; }
+
+/* ─── Empty state ─── */
+.empty-state {
+  text-align: center; padding: 30px 14px;
+  opacity: 0.6; font-size: 13px; line-height: 1.6;
+}
+.empty-state p { margin-bottom: 16px; }
+.empty-state .btn-ghost { width: auto; display: inline-block; padding: 8px 20px; }
+
+/* ─── Utilities ─── */
+.text-mono { font-family: 'Cascadia Code', 'Consolas', monospace; }
+.hidden { display: none !important; }

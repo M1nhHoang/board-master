@@ -1,0 +1,172 @@
+/* ─── Buttons ─── */
+.btn-row {
+  display: flex; gap: 8px; padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.btn {
+  flex: 1; padding: 7px 12px;
+  border: none; border-radius: 4px;
+  font-size: 12px; font-weight: 600;
+  cursor: pointer; text-align: center;
+  display: flex; align-items: center; justify-content: center; gap: 5px;
+  transition: opacity 0.15s;
+}
+.btn:hover { opacity: 0.85; }
+.btn-primary { background: var(--btn-bg); color: var(--btn-fg); }
+.btn-primary:hover { background: var(--btn-hover); }
+.btn-secondary { background: var(--btn-secondary-bg); color: var(--btn-secondary-fg); }
+.btn-secondary:hover { background: var(--btn-secondary-hover); }
+.btn-danger { background: var(--error); color: #fff; }
+
+.btn-ghost {
+  background: transparent; border: 1px solid var(--border);
+  color: var(--fg); padding: 8px 14px; cursor: pointer;
+  border-radius: 4px; font-size: 12px; font-weight: 600;
+  text-align: center; width: 100%;
+}
+.btn-ghost:hover { background: #f1f5f9; }
+
+.btn-back {
+  background: none; border: none; color: var(--fg);
+  cursor: pointer; font-size: 12px; opacity: 0.7;
+  display: flex; align-items: center; gap: 4px;
+}
+.btn-back:hover { opacity: 1; }
+
+/* ─── Toggle ─── */
+.toggle-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 4px 0;
+}
+.toggle-label { font-size: 12px; font-weight: 600; }
+.toggle {
+  position: relative; width: 36px; height: 20px;
+  background: #cbd5e1; border-radius: 10px;
+  cursor: pointer; transition: background 0.2s;
+}
+.toggle.on { background: var(--accent); }
+.toggle-knob {
+  position: absolute; top: 2px; left: 2px;
+  width: 16px; height: 16px; border-radius: 50%;
+  background: #fff; transition: transform 0.2s;
+}
+.toggle.on .toggle-knob { transform: translateX(16px); }
+
+/* ─── Dropdown ─── */
+.dropdown-wrapper { position: relative; }
+.dropdown-btn {
+  width: 100%; padding: 6px 10px;
+  background: var(--input-bg); color: var(--input-fg);
+  border: 1px solid var(--input-border); border-radius: 4px;
+  font-size: 12px; cursor: pointer; text-align: left;
+  display: flex; align-items: center; justify-content: space-between;
+}
+.dropdown-btn:hover { border-color: var(--accent); }
+.dropdown-menu {
+  position: absolute; top: calc(100% + 4px); left: 0; right: 0;
+  background: #ffffff; border: 1px solid var(--border);
+  border-radius: 4px; z-index: 10; overflow: hidden;
+  display: none; box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+.dropdown-menu.open { display: block; }
+.dropdown-item {
+  padding: 6px 10px; font-size: 12px; cursor: pointer;
+  display: flex; align-items: center; gap: 6px;
+}
+.dropdown-item:hover { background: #f1f5f9; }
+.dropdown-item.selected { color: var(--accent); font-weight: 600; }
+.dropdown-item .check { opacity: 0; }
+.dropdown-item.selected .check { opacity: 1; }
+
+/* ─── Hints card ─── */
+.hints-card {
+  background: var(--input-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px; padding: 8px 10px;
+  margin-top: 6px;
+}
+
+.hint-row {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+.hint-row:last-child { border-bottom: none; }
+
+.hint-medal { font-size: 16px; flex-shrink: 0; line-height: 1; }
+.hint-body { flex: 1; min-width: 0; }
+.hint-move {
+  font-weight: 700; font-size: 13px;
+  display: flex; align-items: center; gap: 6px;
+}
+.hint-move-text { font-family: 'Cascadia Code', 'Consolas', monospace; }
+.hint-eval {
+  font-size: 11px; padding: 1px 5px;
+  border-radius: 3px; font-weight: 600;
+  background: #ecfdf5; color: var(--success);
+}
+.hint-eval.negative {
+  background: #fef2f2; color: var(--error);
+}
+.hint-pv {
+  font-size: 11px; opacity: 0.55; margin-top: 2px;
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+}
+
+.hint-footer {
+  display: flex; gap: 14px; font-size: 11px;
+  opacity: 0.55; margin-top: 6px; padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+
+/* ─── Eval bar ─── */
+.eval-section { padding: 10px 14px; border-bottom: 1px solid var(--border); }
+.eval-bar-track {
+  width: 100%; height: 14px;
+  background: #e2e8f0; border-radius: 7px;
+  overflow: hidden; margin: 6px 0;
+}
+.eval-bar-fill {
+  height: 100%; border-radius: 7px;
+  background: linear-gradient(90deg, #94a3b8 0%, var(--success) 100%);
+  transition: width 0.5s ease;
+}
+.eval-info {
+  display: flex; justify-content: space-between;
+  font-size: 11px; opacity: 0.7;
+}
+
+/* ─── Slider ─── */
+input[type="range"] {
+  -webkit-appearance: none; appearance: none; width: 100%;
+  height: 6px; border-radius: 3px;
+  background: #e2e8f0; outline: none;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none; width: 14px; height: 14px;
+  border-radius: 50%; background: var(--accent); cursor: pointer;
+}
+
+/* ─── Multi-select buttons ─── */
+.multi-btn-group { display: flex; gap: 4px; }
+.multi-btn {
+  flex: 1; padding: 5px 8px; font-size: 12px;
+  border: 1px solid var(--border); border-radius: 4px;
+  background: transparent; color: var(--fg); cursor: pointer;
+  text-align: center; font-weight: 600;
+}
+.multi-btn.selected {
+  background: var(--accent); color: #fff;
+  border-color: var(--accent);
+}
+.multi-btn:hover:not(.selected) { background: #f1f5f9; }
+
+/* ─── Copy email button ─── */
+.copy-email-btn {
+  background: var(--btn-bg); color: var(--btn-fg);
+  border: none; border-radius: 4px; padding: 4px 10px;
+  font-size: 11px; font-weight: 600; cursor: pointer;
+  flex-shrink: 0; transition: opacity 0.15s;
+}
+.copy-email-btn:hover { opacity: 0.85; }
+.copy-email-btn.copied { background: #10b981; }

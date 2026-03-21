@@ -1,0 +1,74 @@
+{
+  "manifest_version": 3,
+  "name": "Board Master",
+  "version": "0.1.0",
+  "description": "Chess & Gomoku hint assistant with auto-play support",
+  "permissions": ["activeTab", "storage", "scripting"],
+  "host_permissions": [
+    "https://www.chess.com/*",
+    "https://lichess.org/*",
+    "https://www.playok.com/*",
+    "https://www.xiangqi.com/*",
+    "https://gomokuonline.com/*",
+    "*://*.facebook.com/*",
+    "*://*.fbsbx.com/*",
+    "https://minhhoang.info/*"
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "background": {
+    "service_worker": "background/background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.chess.com/*"],
+      "js": ["content/chess/chesscom-page.js"],
+      "world": "MAIN",
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.chess.com/*"],
+      "js": ["content/chess/arrows.js", "content/chess/core.js", "content/chess/chesscom.js"]
+    },
+    {
+      "matches": ["https://lichess.org/*"],
+      "js": ["content/chess/arrows.js", "content/chess/core.js", "content/chess/lichess.js"]
+    },
+    {
+      "matches": ["https://www.playok.com/*", "https://www.xiangqi.com/*"],
+      "js": ["content/xiangqi.js"]
+    },
+    {
+      "matches": ["https://gomokuonline.com/*", "https://www.playok.com/*"],
+      "js": ["content/gomoku.js"]
+    },
+    {
+      "matches": ["*://*.facebook.com/*", "*://*.fbsbx.com/*"],
+      "js": ["content/gomoku.js"],
+      "all_frames": true,
+      "run_at": "document_idle"
+    }
+  ],
+  "commands": {
+    "toggle-hints": {
+      "suggested_key": { "default": "Alt+H" },
+      "description": "Toggle Hints"
+    },
+    "toggle-auto": {
+      "suggested_key": { "default": "Alt+A" },
+      "description": "Toggle Auto Mode"
+    }
+  }
+}

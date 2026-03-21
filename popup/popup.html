@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Board Master</title>
+  <link rel="stylesheet" href="css/base.css">
+  <link rel="stylesheet" href="css/components.css">
+  <link rel="stylesheet" href="css/views.css">
+</head>
+<body>
+  <div id="app">
+
+    <!-- ⑧ NOT DETECTED -->
+    <div id="view-not-detected" class="view active">
+      <div class="header">
+        <div class="header-left">♟ Board Master</div>
+      </div>
+      <div class="section">
+        <div class="status">
+          <span class="status-dot disconnected"></span>
+          Status: No game detected
+        </div>
+      </div>
+      <div class="empty-state">
+        <p>Navigate to a supported platform<br>to start using Board Master</p>
+        <button class="btn-ghost" id="btn-view-platforms-empty">📋 View Platforms</button>
+      </div>
+    </div>
+
+    <!-- ①② MAIN -->
+    <div id="view-main" class="view">
+      <div class="header">
+        <div class="header-left">♟ Board Master</div>
+        <div class="header-right" id="main-game-badge"></div>
+      </div>
+      <div class="section">
+        <div class="status">
+          <span class="status-dot connected"></span>
+          <span>Status: <span id="main-status-text">Connected</span></span>
+        </div>
+      </div>
+
+      <!-- Gomoku rule (hidden for chess) -->
+      <div class="section" id="gomoku-rule-section" style="display:none">
+        <div class="dropdown-wrapper" id="rule-dropdown">
+          <button class="dropdown-btn" id="rule-dropdown-btn">
+            <span id="rule-dropdown-label">Rule: Freestyle</span>
+            <span>▼</span>
+          </button>
+          <div class="dropdown-menu" id="rule-dropdown-menu">
+            <div class="dropdown-item selected" data-rule="freestyle"><span class="check">●</span> Freestyle</div>
+            <div class="dropdown-item" data-rule="standard-renju"><span class="check">●</span> Standard Renju</div>
+            <div class="dropdown-item" data-rule="free-renju"><span class="check">●</span> Free Renju</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- HINTS section -->
+      <div class="section" id="hints-section">
+        <div class="toggle-row">
+          <span class="toggle-label" id="hints-title">HINTS</span>
+          <div class="toggle on" id="toggle-hints">
+            <span class="toggle-knob"></span>
+          </div>
+        </div>
+
+        <!-- Chess hints card -->
+        <div class="hints-card" id="chess-hints-card">
+          <div id="hints-list"></div>
+          <div class="hint-footer" id="hints-footer">
+            <span id="hint-ponder">Ponder: —</span>
+            <span id="hint-engine">Engine: —</span>
+          </div>
+        </div>
+
+        <!-- Gomoku hint card -->
+        <div class="gomoku-hint-card" id="gomoku-hint-card" style="display:none">
+          <div class="gomoku-place">⊕ Place at: <strong id="gomoku-hint-pos">—</strong></div>
+          <div class="gomoku-engine" id="gomoku-hint-engine">Engine: —</div>
+        </div>
+      </div>
+
+      <!-- EVALUATION (chess only) -->
+      <div class="eval-section" id="eval-section">
+        <div class="section-title">EVALUATION</div>
+        <div class="eval-bar-track">
+          <div class="eval-bar-fill" id="eval-bar-fill" style="width:50%"></div>
+        </div>
+        <div class="eval-info">
+          <span id="eval-score">White 0.00</span>
+          <span id="eval-depth">Depth: 0</span>
+        </div>
+      </div>
+
+      <!-- Bottom buttons -->
+      <div class="btn-row">
+        <button class="btn btn-primary" id="btn-auto-start">▶ AUTO</button>
+        <button class="btn btn-secondary" id="btn-settings">⚙ Settings</button>
+      </div>
+      <div class="section" style="text-align:center">
+        <button class="btn-ghost" id="btn-view-platforms">📋 Platforms</button>
+      </div>
+    </div>
+
+    <!-- ③④ AUTO MODE -->
+    <div id="view-auto" class="view">
+      <div class="header">
+        <div class="header-left">♟ Board Master</div>
+        <div class="header-right" id="auto-game-badge"></div>
+      </div>
+      <div class="section">
+        <div class="status">
+          <span class="status-dot connected"></span>
+          <span>Status: Connected</span>
+        </div>
+      </div>
+      <div class="section">
+        <div class="auto-banner">⚠ AUTO MODE ACTIVE</div>
+        <div class="auto-rule-line" id="auto-rule-line" style="display:none"></div>
+        <div class="auto-card">
+          <div class="line"><span>⏳</span> <span class="line-label">Waiting for opponent...</span></div>
+          <div class="line">
+            <span class="line-label">Next:</span>
+            <span class="line-value text-mono" id="auto-next-move">—</span>
+            <span class="hint-eval" id="auto-next-eval">[0.00]</span>
+          </div>
+          <div class="line">
+            <span class="line-label" id="auto-action-label">Playing in:</span>
+            <span class="line-value" id="auto-countdown-text">0s</span>
+          </div>
+          <div class="countdown-track">
+            <div class="countdown-fill" id="auto-countdown-fill" style="width:0%"></div>
+          </div>
+          <div class="line">
+            <span class="line-label" id="auto-count-label">Moves played:</span>
+            <span class="line-value" id="auto-count-value">0</span>
+          </div>
+          <div class="line" id="auto-win-line">
+            <span class="line-label">Win chance:</span>
+            <span class="line-value" id="auto-win-value">50%</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Eval bar (chess only) -->
+      <div class="eval-section" id="auto-eval-section">
+        <div class="section-title">EVALUATION</div>
+        <div class="eval-bar-track">
+          <div class="eval-bar-fill" id="auto-eval-bar-fill" style="width:50%"></div>
+        </div>
+        <div class="eval-info">
+          <span id="auto-eval-score">White 0.00</span>
+          <span id="auto-eval-depth">Depth: 0</span>
+        </div>
+      </div>
+
+      <div class="btn-row">
+        <button class="btn btn-danger" id="btn-auto-stop">■ STOP</button>
+        <button class="btn btn-secondary" id="btn-auto-settings">⚙ Settings</button>
+      </div>
+      <div class="section" style="text-align:center">
+        <button class="btn-ghost" id="btn-auto-platforms">📋 Platforms</button>
+      </div>
+    </div>
+
+    <!-- ⑤⑥ SETTINGS -->
+    <div id="view-settings" class="view">
+      <div class="header">
+        <div class="header-left">♟ Board Master</div>
+        <button class="btn-back" id="btn-settings-back">← Back</button>
+      </div>
+      <div class="section">
+        <div class="section-title" id="settings-title" style="margin-bottom:0">CHESS SETTINGS</div>
+      </div>
+
+      <div class="section" id="settings-body">
+        <!-- Filled by JS -->
+      </div>
+
+      <div class="section">
+        <div class="section-title">Hotkeys</div>
+        <div class="hotkey-row">
+          <span>Toggle Hints</span>
+          <span class="hotkey-key">Alt + H</span>
+        </div>
+        <div class="hotkey-row">
+          <span>Toggle Auto</span>
+          <span class="hotkey-key">Alt + A</span>
+        </div>
+      </div>
+
+      <div class="section" style="text-align:center">
+        <button class="btn-ghost" id="btn-reset-defaults">Reset to Default</button>
+      </div>
+    </div>
+
+    <!-- ⑦ PLATFORMS -->
+    <div id="view-platforms" class="view">
+      <div class="header">
+        <div class="header-left">♟ Board Master</div>
+        <button class="btn-back" id="btn-platforms-back">← Back</button>
+      </div>
+      <div class="section">
+        <div class="section-title">SUPPORTED PLATFORMS</div>
+
+        <div class="platform-group">
+          <div class="platform-group-title">♚ CHESS</div>
+          <div class="platform-item">✅ chess.com</div>
+        </div>
+
+        <div class="platform-group">
+          <div class="platform-group-title">♜ XIANGQI</div>
+          <div class="platform-item coming-soon">Coming soon</div>
+        </div>
+
+        <div class="platform-group">
+          <div class="platform-group-title">⊕ GOMOKU</div>
+          <div class="platform-item">✅ Facebook Caro</div>
+        </div>
+      </div>
+      <div class="section platform-footer">
+        <span>💡 Want more? Reach me at</span>
+        <button class="copy-email-btn" id="btn-copy-email">📧 Copy</button>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Load order matters: utils → state → views → navigation → messaging → init -->
+  <script src="js/utils.js"></script>
+  <script src="js/state.js"></script>
+  <script src="js/views/main.js"></script>
+  <script src="js/views/auto.js"></script>
+  <script src="js/views/settings.js"></script>
+  <script src="js/navigation.js"></script>
+  <script src="js/messaging.js"></script>
+  <script src="js/init.js"></script>
+</body>
+</html>
