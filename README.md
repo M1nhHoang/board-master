@@ -1,11 +1,126 @@
 # Board Master — Chrome Extension
 
-Chess & board-game hint assistant with auto-play support.  
+Chess & board-game hint assistant with auto-play support.
 Built with **Chrome Extension Manifest V3**.
 
 ---
 
-## Project Structure
+## Quick Start
+
+1. Clone or download this repository
+2. Open `chrome://extensions/` in Chrome
+3. Enable **Developer mode** (top right corner)
+4. Click **Load unpacked** and select the project folder
+5. Navigate to a supported game site — the extension activates automatically
+6. Click the extension icon on the toolbar to open the control popup
+
+> **Tip:** Use **Alt+H** to toggle hints, **Alt+A** to toggle auto-play.
+
+---
+
+## Supported Platforms
+
+| Platform | Game | Status | Features |
+|----------|------|--------|----------|
+| [chess.com](https://www.chess.com) | Chess | Active | Hints, arrow overlay, auto-play |
+| [lichess.org](https://lichess.org) | Chess | Active | Hints, arrow overlay |
+| [Facebook Caro](https://www.facebook.com/gaming/play/) | Gomoku | Active | Hints, full auto-play loop |
+| [playok.com](https://www.playok.com) | Xiangqi / Gomoku | Planned | Game detection only |
+| [xiangqi.com](https://www.xiangqi.com) | Xiangqi | Planned | Game detection only |
+| [gomokuonline.com](https://gomokuonline.com) | Gomoku | Planned | Game detection only |
+
+---
+
+## Features
+
+### Chess
+- **Move suggestions** with evaluation scores (up to 3 lines via multiPV)
+- **Arrow overlay** drawn directly on the board via SVG
+- **Evaluation bar** showing win probability (sigmoid-based)
+- **Auto-play** with configurable delay
+- **Skill level** control (Elo 800 – 3200+)
+
+### Gomoku (Facebook Caro)
+- **Move hints** on the board — red **X** or blue **O** based on whose turn it is
+- **Full auto-play loop** — queues games, plays moves, exits, and repeats
+- **User side detection** — reads the footer DOM to determine if you're X (black) or O (white)
+- **Rectangular board support** — handles non-square boards (e.g. 13x17):
+  - Sends a padded square board to the engine (e.g. 17x17)
+  - If the engine suggests outside the real board, retries with a **double-row wall pattern** that blocks unreachable cells while avoiding false threats (max 2 consecutive same-color stones in any direction)
+- **Random delay** — configurable min/max range to vary auto-play timing
+- **Double-click confirmation** — simulates the two-click move placement Facebook Caro requires
+- **Cross-iframe injection** — content scripts run inside the `fbsbx.com` game iframe
+
+---
+
+## Installation
+
+1. Clone or download this repository
+2. Open `chrome://extensions/` in Chrome
+3. Enable **Developer mode** (top right)
+4. Click **Load unpacked** and select the project folder
+5. Navigate to a supported game site — the extension activates automatically
+
+---
+
+## Usage
+
+- Click the extension icon to open the popup
+- Hints appear automatically when a game is detected
+- **Alt+H** — toggle hints on/off
+- **Alt+A** — toggle auto-play mode
+
+### Auto Mode (Gomoku)
+
+When activated, the full auto loop runs continuously:
+
+```
+Lobby → click "Play Now"
+  → Searching → wait for match
+    → Playing → analyze board, place moves on your turn
+      → Game Over → click "Exit"
+        → back to Lobby
+```
+
+Auto mode can be started from any state (lobby, mid-game, game-over) and immediately performs the correct next action.
+
+---
+
+## Settings
+
+Open via the gear icon in the popup.
+
+### Chess
+
+| Setting | Range | Default |
+|---------|-------|---------|
+| Skill Level | 0 – 20 | 20 |
+| Search Depth | 1 – 15 | 12 |
+| Suggestions (multiPV) | 1 / 2 / 3 | 3 |
+| Auto Move Delay | 200 – 5000 ms | 1000 ms |
+| Show Evaluation Bar | on / off | on |
+| Show PV Lines | on / off | on |
+| Show Ponder Move | on / off | on |
+| Highlight Best Move | on / off | on |
+
+### Gomoku
+
+| Setting | Range | Default |
+|---------|-------|---------|
+| Board Size | 10 – 22 | 15 |
+| Rule | Freestyle / Standard Renju / Free Renju | Freestyle |
+| Search Depth | 1 – 15 | 10 |
+| Auto Move Delay | 200 – 10000 ms | 1000 ms |
+| Random Delay | on / off | off |
+| Random Delay Min | 20 – 10000 ms | 200 ms |
+| Random Delay Max | 20 – 10000 ms | 5000 ms |
+| Highlight Best Move | on / off | on |
+
+---
+
+## Architecture
+
+### Project Structure
 
 ```
 chess-insight/
@@ -13,72 +128,84 @@ chess-insight/
 │
 ├── background/                      # Service worker (ES modules)
 │   ├── background.js                # Entry point — commands, message routing
-│   ├── api.js                       # HTTP client for the Stockfish API
+│   ├── api.js                       # HTTP client (Chess + Gomoku)
 │   └── evaluation.js                # UCI → display conversion, eval formatting
 │
 ├── content/                         # Content scripts (injected into game sites)
-│   ├── chess/                       # ♚ Chess — one file per platform
-│   │   ├── core.js                  # Shared logic: state, messaging, auto-play, observer
+│   ├── chess/
+│   │   ├── core.js                  # Shared logic: state, messaging, auto-play
 │   │   ├── chesscom.js              # chess.com adapter
-│   │   └── lichess.js               # lichess.org adapter
-│   ├── xiangqi.js                   # ♜ Xiangqi (placeholder — coming soon)
-│   └── gomoku.js                    # ⊕ Gomoku  (placeholder — coming soon)
+│   │   ├── chesscom-page.js         # chess.com page-world FEN reader (MAIN world)
+│   │   ├── lichess.js               # lichess.org adapter
+│   │   └── arrows.js                # SVG arrow overlay
+│   ├── gomoku.js                    # Facebook Caro + gomoku platforms
+│   └── xiangqi.js                   # Xiangqi (placeholder)
 │
 ├── popup/                           # Extension popup UI
 │   ├── popup.html                   # Single-page HTML with all views
 │   ├── css/
 │   │   ├── base.css                 # Variables, reset, layout
-│   │   ├── components.css           # Buttons, toggles, dropdowns, hints, eval bar
-│   │   └── views.css                # Auto mode, settings, platforms styles
+│   │   ├── components.css           # Buttons, toggles, dropdowns, eval bar
+│   │   └── views.css                # Auto mode, settings, platforms
 │   └── js/
-│       ├── utils.js                 # DOM helpers ($, $$), escapeHtml, capitalize
-│       ├── state.js                 # DEFAULT_STATE, loadState/saveState (chrome.storage)
-│       ├── navigation.js            # View router (showView, navigateTo)
-│       ├── messaging.js             # chrome.runtime message listener
-│       ├── init.js                  # Bootstrap, button wiring, proactive detection
+│       ├── utils.js                 # DOM helpers, escapeHtml, capitalize
+│       ├── state.js                 # DEFAULT_STATE, loadState/saveState
+│       ├── navigation.js            # View router
+│       ├── messaging.js             # Message listener, countdown timers
+│       ├── init.js                  # Bootstrap, game detection, button wiring
 │       └── views/
 │           ├── main.js              # Hint display (chess & gomoku)
 │           ├── auto.js              # Auto-play mode view
-│           └── settings.js          # Settings form (sliders, toggles, multiPV)
+│           └── settings.js          # Settings form generator
 │
-└── icons/                           # Extension icons (16/48/128 px, PNG + SVG)
+└── icons/                           # 16/48/128 px (PNG + SVG)
 ```
 
----
-
-## Architecture Overview
-
-### Data flow
+### Data Flow
 
 ```
-┌─────────────┐   FEN changed    ┌────────────────┐   POST /api/…   ┌───────────┐
-│ Content      │ ──────────────▶  │ Background      │ ─────────────▶  │ Stockfish │
-│ Script       │                  │ Service Worker  │                 │ API       │
-│ (adapter)    │ ◀────────────── │                 │ ◀───────────── │           │
-└─────────────┘  updateHints msg └────────────────┘  JSON response  └───────────┘
-       │                                 │
-       │ gameDetected /                  │ updateHints
-       │ analyzeFEN                      │
-       ▼                                 ▼
-                              ┌────────────────┐
-                              │ Popup UI        │
-                              │ (popup.html)    │
-                              └────────────────┘
+┌──────────────┐   FEN / board     ┌──────────────────┐   POST /api/…   ┌──────────┐
+│ Content       │ ───────────────▶  │ Background        │ ─────────────▶  │ Engine   │
+│ Script        │                   │ Service Worker    │                  │ API      │
+│ (adapter)     │ ◀─────────────── │                   │ ◀───────────── │          │
+└──────────────┘  updateHints msg  └──────────────────┘  JSON response  └──────────┘
+       │                                    │
+       │ gameDetected                       │ updateHints /
+       │ analyzeFEN                         │ updateGomokuHints
+       │ analyzeGomoku                      │
+       ▼                                    ▼
+                                 ┌──────────────────┐
+                                 │ Popup UI          │
+                                 │ (popup.html)      │
+                                 └──────────────────┘
 ```
 
-### Message protocol
+### Message Protocol
 
-| Command           | Direction                  | Payload                                       |
-| ----------------- | -------------------------- | --------------------------------------------- |
-| `gameDetected`    | Content → Background → Popup | `{ gameType, platform }`                      |
-| `analyzeFEN`      | Content → Background       | `{ fen, platform }`                           |
-| `updateHints`     | Background → Popup/Content | `{ hints[], ponder, engineTime, evalScore, …}` |
-| `getFEN`          | Background → Content       | _(none)_                                      |
-| `requestAnalysis` | Popup → Background         | _(none)_                                      |
-| `startAuto`       | Popup → Content            | _(none)_                                      |
-| `stopAuto`        | Popup → Content            | _(none)_                                      |
-| `toggleHints`     | Hotkey / Popup ↔ Content   | _(none)_                                      |
-| `toggleAuto`      | Hotkey / Popup ↔ Content   | _(none)_                                      |
+| Command | Direction | Payload |
+|---------|-----------|---------|
+| `gameDetected` | Content → BG → Popup | `{ gameType, platform }` |
+| `analyzeFEN` | Content → BG | `{ fen, platform }` |
+| `analyzeGomoku` | Content → BG | `{ boardSize, moves, turn, isRetry }` |
+| `updateHints` | BG → Content/Popup | `{ hints[], ponder, evalScore, … }` |
+| `updateGomokuHints` | BG → Content/Popup | `{ move, turn, engineTime, isRetry }` |
+| `getFEN` | BG → Content | _(none)_ |
+| `startAuto` / `stopAuto` | Popup → Content | _(none)_ |
+| `toggleHints` | Hotkey/Popup ↔ Content | _(none)_ |
+
+### Key Patterns
+
+- **Adapter pattern** — `core.js` provides shared chess logic; platform adapters register via `ChessCore.register(name, { detectGame, requestFen, onGameDetected })`
+- **World isolation bridge** — chess.com's board API lives in the page world; `chesscom-page.js` runs in `MAIN` world and communicates via `CustomEvent`
+- **Wall retry** — for non-square gomoku boards, if the engine suggests out of bounds, retries with a double-row checkerboard wall:
+  ```
+  Row pattern (repeats every 4 rows):
+    Row 0: ■ □ ■ □        ■ = player 1
+    Row 1: □ ■ □ ■        □ = player 2
+    Row 2: □ ■ □ ■        Max 2 consecutive same color
+    Row 3: ■ □ ■ □        in any direction (H/V/diagonal)
+  ```
+- **Context invalidation guard** — gomoku content script wraps all `chrome.runtime` calls in try-catch; on context loss, cleans up observers and intervals
 
 ---
 
@@ -90,8 +217,6 @@ chess-insight/
 
 Analyze a chess position with Stockfish.
 
-**Request body:**
-
 ```json
 {
   "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
@@ -101,12 +226,12 @@ Analyze a chess position with Stockfish.
 }
 ```
 
-| Field        | Type   | Required | Description                        |
-| ------------ | ------ | -------- | ---------------------------------- |
-| `fen`        | string | Yes      | Board position in FEN notation     |
-| `depth`      | number | No       | Search depth (1–15, default: 12)   |
-| `multiPV`    | number | No       | Number of lines to return (1–3)    |
-| `skillLevel` | number | No       | Engine skill level (0–20)          |
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `fen` | string | Yes | Board position in FEN notation |
+| `depth` | number | No | Search depth (1–15, default 12) |
+| `multiPV` | number | No | Number of lines to return (1–3) |
+| `skillLevel` | number | No | Engine skill level (0–20) |
 
 **Response:**
 
@@ -123,150 +248,89 @@ Analyze a chess position with Stockfish.
 }
 ```
 
-| Field                 | Type   | Description                                             |
-| --------------------- | ------ | ------------------------------------------------------- |
-| `bestmove`            | string | Best move in UCI notation (e.g. `g1f3`)                 |
-| `ponder`              | string | Expected opponent reply in UCI notation                 |
-| `evaluation.type`     | string | `"cp"` (centipawns) or `"mate"` (mate in N)            |
-| `evaluation.value`    | number | Centipawn score, or number of moves to mate             |
-| `lines[].rank`        | number | Line rank (1 = best)                                   |
-| `lines[].move`        | string | First move of this line (UCI)                           |
-| `lines[].score`       | number | Centipawn score for this line                           |
-| `lines[].pv`          | array  | Principal variation — array of UCI moves                |
-| `engineTime`          | number | Analysis time in milliseconds                           |
+### `POST /api/games/gomoku/move`
 
-### `GET /api/games/chess/info`
+Analyze a gomoku position.
 
-Returns engine status and version info.
+```json
+{
+  "boardSize": 17,
+  "rule": 0,
+  "moves": [
+    { "x": 6, "y": 6, "player": 1 },
+    { "x": 7, "y": 7, "player": 2 }
+  ],
+  "maxDepth": 10
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `boardSize` | number | Yes | Board dimension (square) |
+| `rule` | number | No | 0 = freestyle, 1 = standard renju, 2 = free renju |
+| `moves` | array | Yes | List of `{ x, y, player }` stones |
+| `maxDepth` | number | No | Search depth (default 10) |
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "move": { "x": 8, "y": 6 },
+  "engineTime": 62
+}
+```
 
 ---
 
-## Content Script — Platform Adapter Pattern
+## Adding a New Chess Platform
 
-Each chess platform has different DOM structures. The adapter pattern keeps
-platform-specific code isolated while sharing all common logic.
-
-### How it works
-
-1. **`core.js`** loads first and creates the global `ChessCore` object with:
-   - State management (`lastFen`, `gameDetected`, `autoMode`)
-   - `MutationObserver` for board detection
-   - Message listener (handles `getFEN`, `startAuto`, `stopAuto`, etc.)
-   - `handleFenChange(fen)` — deduplicates & sends `analyzeFEN` to background
-
-2. **Platform adapter** (e.g. `chesscom.js`) loads second and calls:
-   ```js
-   ChessCore.register('chess.com', {
-     detectGame,      // () => boolean — is a game board present?
-     requestFen,      // () => Promise<string|null> — get current FEN
-     onGameDetected,  // () => void — called once when board first appears
-   });
-   ```
-
-3. **Manifest** pairs the files per platform:
-   ```json
-   { "matches": ["https://www.chess.com/*"], "js": ["content/chess/core.js", "content/chess/chesscom.js"] }
-   { "matches": ["https://lichess.org/*"],   "js": ["content/chess/core.js", "content/chess/lichess.js"] }
-   ```
-
-### Adding a new chess platform
-
-1. Create `content/chess/<platform>.js`
-2. Implement the three adapter functions:
+1. Create `content/chess/<platform>.js`:
 
 ```js
-// content/chess/chess24.js
 (function () {
   'use strict';
 
   function detectGame() {
-    // Return true if a game board element exists in the DOM
     return !!document.querySelector('.board-component');
   }
 
   function requestFen() {
-    // Return a Promise that resolves to the current FEN string (or null)
-    // May need page-script injection if the FEN is only on page-world objects
-    return Promise.resolve(/* read FEN from DOM or page context */);
+    return Promise.resolve(/* read FEN from DOM */);
   }
 
   function onGameDetected() {
-    // Called once when the board is first detected.
-    // Use this to inject page scripts, start FEN polling, etc.
-    // Call  ChessCore.handleFenChange(fen)  whenever the position changes.
+    // Start polling, inject page scripts, etc.
+    // Call ChessCore.handleFenChange(fen) when position changes.
   }
 
-  ChessCore.register('chess24.com', { detectGame, requestFen, onGameDetected });
+  ChessCore.register('platform.com', { detectGame, requestFen, onGameDetected });
 })();
 ```
 
-3. Add to `manifest.json`:
-```json
-{
-  "matches": ["https://chess24.com/*"],
-  "js": ["content/chess/core.js", "content/chess/chess24.js"]
-}
-```
-
-4. Add the host to `host_permissions`:
-```json
-"host_permissions": [
-  "https://chess24.com/*",
-  ...
-]
-```
+2. Add to `manifest.json` content_scripts and host_permissions.
 
 ---
 
 ## Popup UI Views
 
-The popup uses a single HTML page with 5 view containers, toggled via CSS class `.active`:
+Single HTML page with 5 views toggled via `.active` class:
 
-| View ID              | Description                                  | State trigger               |
-| -------------------- | -------------------------------------------- | --------------------------- |
-| `view-not-detected`  | No game found — shows "Navigate to…" prompt  | Default / no chess site     |
-| `view-main`          | Hint cards, eval bar, auto start button      | Game detected               |
-| `view-auto`          | Auto-play mode with countdown & stats        | Auto mode enabled           |
-| `view-settings`      | Sliders, toggles, multiPV selector           | Settings button clicked     |
-| `view-platforms`     | Supported platform list                      | Platforms button clicked    |
-
-### Script load order (popup.html)
-
-Scripts are loaded as plain `<script>` tags (not ES modules) in dependency order:
-
-1. `js/utils.js` — DOM helpers, utility functions
-2. `js/state.js` — `DEFAULT_STATE`, `state` object, `loadState()`, `saveState()`
-3. `js/views/main.js` — `updateMainView()`, `renderChessHints()`
-4. `js/views/auto.js` — `updateAutoView()`
-5. `js/views/settings.js` — `renderSettings()`, HTML helpers
-6. `js/navigation.js` — `showView()`, `navigateTo()`
-7. `js/messaging.js` — `sendToActiveTab()`, message listener
-8. `js/init.js` — `init()`, button wiring, proactive game detection
-
-### State persistence
-
-All state is persisted to `chrome.storage.local` under key `boardMasterState`.
-The popup loads state on open and saves after every change.
+| View | Description | Trigger |
+|------|-------------|---------|
+| `view-not-detected` | "Navigate to a supported site" | No game found |
+| `view-main` | Hint cards, eval bar, auto button | Game detected |
+| `view-auto` | Auto-play countdown & stats | Auto mode active |
+| `view-settings` | Sliders, toggles, rule dropdown | Settings clicked |
+| `view-platforms` | Supported platform list | Platforms clicked |
 
 ---
 
 ## Keyboard Shortcuts
 
-| Shortcut  | Action        |
-| --------- | ------------- |
-| `Alt + H` | Toggle Hints  |
-| `Alt + A` | Toggle Auto   |
+| Shortcut | Action |
+|----------|--------|
+| `Alt + H` | Toggle Hints |
+| `Alt + A` | Toggle Auto |
 
 ---
-
-## TODO / Future Work
-
-- [ ] **Board arrow overlay** — Draw arrows from source to target square on the actual game board (content script side)
-- [ ] **Auto-play move execution** — Actually click/drag pieces on the board (requires per-platform DOM interaction)
-- [ ] **Xiangqi support** — Implement `content/xiangqi/` with the same adapter pattern
-- [ ] **Gomoku support** — Implement `content/gomoku/` with the same adapter pattern
-- [ ] **More chess platforms** — chess24.com, playchess.com, etc.
-- [ ] **Error handling in popup** — Show API errors, connection issues in the UI
-- [ ] **Rate limiting** — Debounce rapid FEN changes to avoid spamming the API
-- [ ] **Options page** — Full-page settings as alternative to popup settings
-- [ ] **Build pipeline** — Bundler (esbuild/vite), linting, zip for Web Store submission
