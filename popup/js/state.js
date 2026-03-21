@@ -23,6 +23,9 @@ const DEFAULT_STATE = {
     defaultRule: 'freestyle',
     searchDepth: 10,
     autoDelay: 1000,
+    randomDelay: false,
+    randomDelayMin: 200,
+    randomDelayMax: 5000,
     highlightBestMove: true,
   },
 

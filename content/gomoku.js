@@ -482,7 +482,16 @@
       }
 
       chrome.storage.local.get('boardMasterState', (result) => {
-        const delay = result.boardMasterState?.gomokuSettings?.autoDelay || 1000;
+        const gs = result.boardMasterState?.gomokuSettings || {};
+        let delay;
+        if (gs.randomDelay) {
+          const min = gs.randomDelayMin || 200;
+          const max = gs.randomDelayMax || 5000;
+          delay = Math.floor(Math.random() * (max - min + 1)) + min;
+        } else {
+          delay = gs.autoDelay || 1000;
+        }
+        console.log('[BM][gomoku] Auto-play in', delay + 'ms', gs.randomDelay ? '(random)' : '');
         autoTimerId = setTimeout(() => { if (autoMode) clickCell(x, y); }, delay);
       });
     }

@@ -59,7 +59,12 @@ function renderSettings() {
         </div>
       </div>
       ${sliderHtml('Search Depth', 'searchDepth', gs.searchDepth, 1, 15)}
-      ${sliderHtml('Auto Move Delay (ms)', 'autoDelay', gs.autoDelay, 200, 5000)}
+      ${sliderHtml('Auto Move Delay (ms)', 'autoDelay', gs.autoDelay, 200, 10000)}
+      ${toggleSettingHtml('Random Delay', 'randomDelay', gs.randomDelay)}
+      <div class="setting-group random-delay-range" style="display:${gs.randomDelay ? 'block' : 'none'}">
+        ${sliderHtml('Min Delay (ms)', 'randomDelayMin', gs.randomDelayMin, 20, 10000)}
+        ${sliderHtml('Max Delay (ms)', 'randomDelayMax', gs.randomDelayMax, 20, 10000)}
+      </div>
       ${toggleSettingHtml('Highlight Best Move', 'highlightBestMove', gs.highlightBestMove)}
     `;
 
@@ -113,6 +118,12 @@ function renderSettings() {
       settingsObj[key] = !settingsObj[key];
       toggle.classList.toggle('on', settingsObj[key]);
       saveState();
+
+      // Show/hide random delay range sliders
+      if (key === 'randomDelay') {
+        const rangeEl = body.querySelector('.random-delay-range');
+        if (rangeEl) rangeEl.style.display = settingsObj[key] ? 'block' : 'none';
+      }
     });
   });
 }
