@@ -1,11 +1,20 @@
 // ─── Background Service Worker (entry point) ───
 // Handles hotkey commands, API calls, and relays messages
 
-import { analyzePosition, analyzeGomokuPosition } from './api.js';
+import { analyzePosition, analyzeGomokuPosition, analyzeGomokuSwap2 } from './api.js';
 import { buildUpdateMessage } from './evaluation.js';
 
 function ruleNameToNumber(name) {
-  const map = { 'freestyle': 0, 'standard-renju': 1, 'free-renju': 2 };
+  const map = {
+    'freestyle':       0,
+    'standard-renju':  1,
+    'free-renju':      2,
+    // Freestyle main rule + swap opening protocol. Use these rule
+    // codes for /move during the opening; the dedicated /swap2
+    // endpoint drives the actual swap-protocol decisions.
+    'free-swap1':      5,
+    'free-swap2':      6,
+  };
   return map[name] ?? 0;
 }
 
@@ -65,12 +74,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   // Content script sent gomoku board for analysis
   if (msg.command === 'analyzeGomoku') {
-    console.log('[BM][bg] analyzeGomoku received, moves:', msg.moves?.length);
+    console.log('[BM][bg] analyzeGomoku received, moves:', msg.moves?.length,
+      'rulePref:', msg.rulePreference || '(none)');
     chrome.storage.local.get('boardMasterState', (result) => {
       const st = result.boardMasterState || {};
       const settings = st.gomokuSettings || { searchDepth: 10 };
-      const rule = ruleNameToNumber(st.gomokuRule || settings.defaultRule || 'freestyle');
+      // Content script may force a specific rule (e.g. 'free-swap2' = 6)
+      // during a swap2 game so renju constraints don't kick in. Honour
+      // that override before falling back to user/state defaults.
+      const ruleName = msg.rulePreference || st.gomokuRule || settings.defaultRule || 'freestyle';
+      const rule = ruleNameToNumber(ruleName);
       const maxDepth = settings.searchDepth || 10;
+      console.log('[BM][bg] Gomoku rule:', ruleName, '→', rule, 'depth:', maxDepth);
 
       safeSend({ command: 'analysisStarted' });
 
@@ -108,6 +123,56 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           safeSend({
             command: 'analysisError',
             error: err.message || 'Gomoku API request failed',
+          });
+        });
+    });
+    return false;
+  }
+
+  // Swap2 protocol decision (opening / swap / move / put_two)
+  if (msg.command === 'analyzeGomokuSwap2') {
+    console.log('[BM][bg] analyzeGomokuSwap2 received, stones:', msg.moves?.length);
+    chrome.storage.local.get('boardMasterState', (result) => {
+      const st = result.boardMasterState || {};
+      const settings = st.gomokuSettings || { searchDepth: 10 };
+      const maxDepth = settings.searchDepth || 10;
+      console.log('[BM][bg] swap2 → POST /api/games/gomoku/swap2',
+        JSON.stringify({ boardSize: msg.boardSize, moves: msg.moves, maxDepth }));
+
+      safeSend({ command: 'analysisStarted' });
+
+      analyzeGomokuSwap2(msg.boardSize, msg.moves, maxDepth)
+        .then((apiResult) => {
+          console.log('[BM][bg] Gomoku swap2 response:', JSON.stringify(apiResult));
+          if (!apiResult.success) {
+            safeSend({
+              command: 'analysisError',
+              error: apiResult.error || 'swap2 engine returned no decision',
+            });
+            return;
+          }
+          const update = {
+            command: 'updateGomokuSwap2',
+            action: apiResult.action,                      // opening|swap|move|put_two
+            move:   apiResult.move  || null,               // when action === 'move'
+            moves:  apiResult.moves || [],                 // when action === 'opening' | 'put_two'
+            engineTime: (apiResult.engineTime || 0) + 'ms',
+            stoneCount: msg.moves?.length || 0,
+          };
+          safeSend(update);
+          if (sender.tab?.id) {
+            chrome.tabs.sendMessage(sender.tab.id, update).catch(() => {});
+          } else {
+            chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+              if (tabs[0]?.id) chrome.tabs.sendMessage(tabs[0].id, update).catch(() => {});
+            });
+          }
+        })
+        .catch((err) => {
+          console.error('[BM][bg] Gomoku swap2 API error:', err);
+          safeSend({
+            command: 'analysisError',
+            error: err.message || 'Gomoku swap2 API request failed',
           });
         });
     });

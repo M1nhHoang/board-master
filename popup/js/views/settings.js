@@ -66,6 +66,7 @@ function renderSettings() {
         ${sliderHtml('Max Delay (ms)', 'randomDelayMax', gs.randomDelayMax, 20, 10000)}
       </div>
       ${toggleSettingHtml('Highlight Best Move', 'highlightBestMove', gs.highlightBestMove)}
+      ${toggleSettingHtml('Swap2 Opening (playok)', 'swap2', gs.swap2)}
     `;
 
     const ruleBtn = body.querySelector('#settings-rule-btn');

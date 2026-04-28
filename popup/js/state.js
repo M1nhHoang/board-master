@@ -27,6 +27,10 @@ const DEFAULT_STATE = {
     randomDelayMin: 200,
     randomDelayMax: 5000,
     highlightBestMove: true,
+    // When true, the playok content script routes 0/3/5-stone
+    // decision points through /api/games/gomoku/swap2 and auto-plays
+    // the engine's chosen action (opening / swap / move / put_two).
+    swap2: false,
   },
 
   // Runtime data (populated by API)

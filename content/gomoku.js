@@ -15,6 +15,8 @@
   } else if (hostname.includes('gomokuonline.com')) {
     platform = 'gomokuonline.com';
   } else if (hostname.includes('playok.com')) {
+    // playok serves multiple games — only attach on /gomoku/ path
+    if (!/\/gomoku(\/|$)/i.test(location.pathname)) return;
     platform = 'playok.com';
   }
 
@@ -38,12 +40,16 @@
     }
   }
 
-  // Non-Facebook platforms placeholder
+  // Non-Facebook platforms
   if (platform !== 'facebook-caro') {
+    if (platform === 'playok.com') {
+      initPlayokGomoku();
+      initPlayokDebug();   // also expose window.bmGomokuDebug for diagnostics
+      return;
+    }
+    // gomokuonline placeholder — detection only
     function detectGame() {
-      if (platform === 'gomokuonline.com') return !!document.querySelector('canvas, .board, #game-board');
-      if (platform === 'playok.com') return !!document.querySelector('canvas, .board, #board');
-      return false;
+      return !!document.querySelector('canvas, .board, #game-board');
     }
     function notifyGameDetected() {
       chrome.runtime.sendMessage({ command: 'gameDetected', gameType: 'gomoku', platform });
@@ -56,6 +62,811 @@
   }
 
   initFacebookCaro();
+
+  // ═══════════════════════════════════════════════════════════════
+  //  Playok Gomoku — canvas-based reader, hint mode (no auto-play yet:
+  //  user-side detection on playok still TBD).
+  //
+  //  Pipeline (mirrors initFacebookCaro but for canvas):
+  //    detectGrid() once → poll snapshotBoard() every 500ms → send
+  //    diff to engine → render hint as DOM overlay over canvas.
+  //  Grid is re-detected automatically when canvas dimensions change
+  //  (playok rewrites canvas.width on viewport resize).
+  // ═══════════════════════════════════════════════════════════════
+  function initPlayokGomoku() {
+    const TAG = '[BM][gomoku][playok]';
+    console.log(TAG, 'init [v5-swap2-direct-sel]');
+
+    const COLORS = {
+      empty:    { r: 240, g: 176, b: 96  },
+      gridLine: { r: 162, g: 108, b: 62  },
+      black:    { r: 40,  g: 40,  b: 40  },
+      white:    { r: 245, g: 245, b: 245 },
+    };
+    const colorMatch = (px, ref, tol) =>
+      Math.abs(px[0] - ref.r) <= tol &&
+      Math.abs(px[1] - ref.g) <= tol &&
+      Math.abs(px[2] - ref.b) <= tol;
+
+    let boardCanvas      = null;
+    let GRID             = null;
+    let prevSnapshotKey  = '';
+    let suggestedMove    = null;
+    let hintsVisible     = true;
+    let highlightEl      = null;
+    let analysisInFlight = false;
+    let pollIntervalId   = null;
+    let resizeObserver   = null;
+    let contextValid     = true;
+    let currentTurn      = 'X';
+    let userSide         = '';   // 'X' / 'O' — from .tplcont DOM
+    let autoMode         = false;
+    let autoTimerId      = null;
+    let notifiedGameDetected = false;
+
+    // Swap2 protocol state
+    let swap2Mode        = false; // mirror of gomokuSettings.swap2
+    let pendingMoves     = [];    // queued from /swap2 (opening = 3, put_two = 2)
+    let pendingTimerId   = null;
+
+    function safeSendMessage(msg) {
+      try { chrome.runtime.sendMessage(msg); }
+      catch (e) {
+        if (e.message && e.message.includes('Extension context invalidated')) {
+          console.log(TAG, 'context invalidated — cleaning up');
+          contextValid = false;
+          cleanup();
+        }
+      }
+    }
+
+    function cleanup() {
+      if (pollIntervalId)  { clearInterval(pollIntervalId); pollIntervalId = null; }
+      if (resizeObserver)  { resizeObserver.disconnect(); resizeObserver = null; }
+      if (autoTimerId)     { clearTimeout(autoTimerId); autoTimerId = null; }
+      if (pendingTimerId)  { clearTimeout(pendingTimerId); pendingTimerId = null; }
+      pendingMoves = [];
+      clearHighlight();
+    }
+
+    // Detect swap2 from playok's table-info banner. Direct selector
+    // (provided by the user) — second child of .ttlcont reads e.g.
+    // "5m, sw" when swap2 is the active rule, just "5m" otherwise.
+    const SWAP2_BANNER_SEL =
+      '#precont > div.gview.sbfixed > div.bsbb.tsb.sbclrd > div > div.ttlcont > div:nth-child(2)';
+    let swap2DetectCalls = 0;
+    let swap2DetectFirstHit = false;
+    function detectSwap2FromDOM() {
+      swap2DetectCalls++;
+      const el = document.querySelector(SWAP2_BANNER_SEL);
+      const text = el ? (el.textContent || '').trim() : '';
+
+      if (swap2DetectCalls <= 5) {
+        console.log(TAG, '[swap2-detect] call#' + swap2DetectCalls,
+          'el=' + (el ? 'yes' : 'no'),
+          'text=' + JSON.stringify(text));
+      }
+
+      if (!el) return null;            // banner not in DOM yet
+      const result = /\bsw\b/i.test(text);
+      if (!swap2DetectFirstHit) {
+        swap2DetectFirstHit = true;
+        console.log(TAG, '[swap2-detect] first hit on call#' + swap2DetectCalls,
+          'text:', JSON.stringify(text), '→ swap2=' + result);
+      }
+      return result;
+    }
+    function refreshSwap2Flag() {
+      const prev = swap2Mode;
+      const dom = detectSwap2FromDOM();
+      if (dom === null) return;     // banner not in DOM yet — keep prev
+      swap2Mode = dom;
+      if (swap2Mode !== prev) {
+        console.log(TAG, 'swap2Mode →', swap2Mode);
+        // Force re-analysis so the next analyzeBoard pick the right
+        // endpoint (/swap2 vs /move) for the current stone count.
+        prevSnapshotKey = '';
+      }
+    }
+
+    function findBoardCanvas() {
+      return Array.from(document.querySelectorAll('canvas'))
+        .find(c => c.width >= 400 && c.height >= 400) || null;
+    }
+
+    function findInputLayer() {
+      return document.querySelector('.tsinbo.bsbb');
+    }
+
+    // ─── Player panel parsing (.tplcont) ───
+    // Each player section contains:
+    //   • a color box (rgb(102,102,102) = black, rgb(255,255,255) = white)
+    //   • .nowrel — player name
+    //   • a triangle div with border-bottom — visibility:inherit when it's
+    //     that player's turn, hidden otherwise
+    //
+    // To identify the local user, read the logged-in name from the page
+    // header (#appcont .nav0.usno.tama .msub) and match against the
+    // panel names — much more reliable than guessing by name colour.
+    function getLoggedInName() {
+      const el = document.querySelector('#appcont .nav0.usno.tama .msub');
+      const t = el && el.textContent && el.textContent.trim();
+      return t || '';
+    }
+
+    function detectPlayers() {
+      const cont = document.querySelector('.tplcont');
+      if (!cont) return null;
+      const myName = getLoggedInName();
+      let turn = null;
+      const candidates = [];
+      // .tplcont's direct children ARE the two player sections.
+      // (Earlier code used ':scope > div > div' which matched grandchildren
+      //  — those are .f12 / .tplext / etc. and never satisfied the
+      //  name+colorBox+arrow gate, so nothing was ever detected.)
+      const panels = cont.querySelectorAll(':scope > div');
+      panels.forEach((sec) => {
+        const nameEl   = sec.querySelector('.nowrel');
+        const colorBox = sec.querySelector('.f12 > div');
+        const arrowEl  = sec.querySelector('.tplext div[style*="border-bottom"]');
+        if (!nameEl || !colorBox) return;
+
+        const bg = (colorBox.style.background || colorBox.style.backgroundColor || '').toLowerCase();
+        const m = bg.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+        if (!m) return;
+        const r = +m[1], g = +m[2], b = +m[3];
+        const side = (r < 200 && g < 200 && b < 200) ? 'X' : 'O';
+
+        const name = nameEl.textContent.trim();
+        const isActive = !!(arrowEl && arrowEl.style.visibility === 'inherit');
+        if (isActive) turn = side;
+
+        const nameColor = (nameEl.style.color || '').toLowerCase();
+        candidates.push({ side, name, isActive, nameColor });
+      });
+
+      // Primary: match logged-in name. Fallback: panel with default
+      // (non-grayed) name colour. Last resort: leftmost panel.
+      let user = null;
+      if (myName) user = candidates.find(c => c.name === myName) || null;
+      if (!user)  user = candidates.find(c => !c.nameColor || c.nameColor === 'inherit') || null;
+      if (!user && candidates.length) user = candidates[0];
+      const opponent = candidates.find(c => c !== user) || null;
+      return { user, opponent, turn, myName, candidates };
+    }
+
+    // ─── Grid detection (auto-extrapolated) ───
+    function detectGrid() {
+      const c = findBoardCanvas();
+      if (!c) return null;
+
+      let img;
+      try {
+        img = c.getContext('2d', { willReadFrequently: true })
+              .getImageData(0, 0, c.width, c.height);
+      } catch (e) { console.warn(TAG, 'getImageData failed:', e.message); return null; }
+      const data = img.data, W = c.width, H = c.height;
+
+      const rowCounts = new Array(H).fill(0);
+      const colCounts = new Array(W).fill(0);
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          const i = (y * W + x) * 4;
+          if (colorMatch([data[i], data[i+1], data[i+2]], COLORS.gridLine, 35)) {
+            rowCounts[y]++;
+            colCounts[x]++;
+          }
+        }
+      }
+
+      const rowPeaks = pickPeaks(rowCounts, Math.max(...rowCounts) * 0.25);
+      const colPeaks = pickPeaks(colCounts, Math.max(...colCounts) * 0.25);
+      if (rowPeaks.length < 5 || colPeaks.length < 5) {
+        console.warn(TAG, 'too few grid peaks',
+          { cols: colPeaks.length, rows: rowPeaks.length });
+        return null;
+      }
+
+      const cellW = medianDiff(colPeaks);
+      const cellH = medianDiff(rowPeaks);
+
+      const peakCounts = (counts, peaks) => peaks.map(p =>
+        Math.max(counts[Math.max(0, p-1)] || 0, counts[p] || 0,
+                 counts[Math.min(counts.length-1, p+1)] || 0));
+      const colHit = Math.max(8, median(peakCounts(colCounts, colPeaks)) * 0.3);
+      const rowHit = Math.max(8, median(peakCounts(rowCounts, rowPeaks)) * 0.3);
+      const colHasLine = (x) => {
+        x = Math.round(x); let m = 0;
+        for (let dx = -2; dx <= 2; dx++) {
+          const xx = x + dx;
+          if (xx >= 0 && xx < W && colCounts[xx] > m) m = colCounts[xx];
+        }
+        return m >= colHit;
+      };
+      const rowHasLine = (y) => {
+        y = Math.round(y); let m = 0;
+        for (let dy = -2; dy <= 2; dy++) {
+          const yy = y + dy;
+          if (yy >= 0 && yy < H && rowCounts[yy] > m) m = rowCounts[yy];
+        }
+        return m >= rowHit;
+      };
+
+      const colXs = extrapolateBounded(colPeaks, cellW, W, colHasLine);
+      const rowYs = extrapolateBounded(rowPeaks, cellH, H, rowHasLine);
+
+      GRID = {
+        x0: colXs[0], y0: rowYs[0], cellW, cellH,
+        cols: colXs.length, rows: rowYs.length,
+        colXs, rowYs,
+        canvasW: W, canvasH: H,
+      };
+      console.log(TAG, 'grid:', GRID.cols + 'x' + GRID.rows,
+        'origin=' + GRID.x0 + ',' + GRID.y0,
+        'cell=' + cellW + 'x' + cellH);
+      // If a hint was previously shown but the grid invalidated (e.g. on
+      // resize / canvas re-render), re-render the highlight at the new
+      // pixel coords now that we have a fresh grid.
+      if (suggestedMove && hintsVisible && !highlightEl) {
+        highlightCell(suggestedMove.x, suggestedMove.y);
+      }
+      return GRID;
+    }
+
+    function pickPeaks(counts, thresh) {
+      const peaks = [];
+      let inPeak = false, peakStart = 0;
+      for (let i = 0; i < counts.length; i++) {
+        if (counts[i] >= thresh) {
+          if (!inPeak) { inPeak = true; peakStart = i; }
+        } else if (inPeak) {
+          peaks.push(Math.round((peakStart + i - 1) / 2));
+          inPeak = false;
+        }
+      }
+      if (inPeak) peaks.push(Math.round((peakStart + counts.length - 1) / 2));
+      return peaks;
+    }
+    function medianDiff(arr) {
+      if (arr.length < 2) return null;
+      const d = [];
+      for (let i = 1; i < arr.length; i++) d.push(arr[i] - arr[i-1]);
+      d.sort((a, b) => a - b);
+      return d[Math.floor(d.length / 2)];
+    }
+    function median(arr) {
+      arr = arr.slice().sort((a, b) => a - b);
+      return arr[Math.floor(arr.length / 2)] || 0;
+    }
+    function extrapolateBounded(peaks, step, limit, isOnFn) {
+      if (peaks.length === 0) return [];
+      const anchor = peaks[Math.floor(peaks.length / 2)];
+      const left = [], right = [];
+      let p = anchor - step, miss = 0;
+      while (p >= 0 && miss < 2) {
+        if (isOnFn(p)) { left.unshift(Math.round(p)); miss = 0; }
+        else miss++;
+        p -= step;
+      }
+      p = anchor + step; miss = 0;
+      while (p < limit && miss < 2) {
+        if (isOnFn(p)) { right.push(Math.round(p)); miss = 0; }
+        else miss++;
+        p += step;
+      }
+      return [...left, Math.round(anchor), ...right];
+    }
+
+    // ─── Snapshot ───
+    function snapshotBoard() {
+      if (!GRID) return null;
+      const c = findBoardCanvas();
+      if (!c) return null;
+      // Canvas was rebuilt under us → re-detect
+      if (c.width !== GRID.canvasW || c.height !== GRID.canvasH) {
+        console.log(TAG, 'canvas size changed — re-detecting');
+        GRID = null; prevSnapshotKey = ''; clearHighlight();
+        return null;
+      }
+      let img;
+      try {
+        img = c.getContext('2d', { willReadFrequently: true })
+              .getImageData(0, 0, c.width, c.height);
+      } catch (e) { return null; }
+      const data = img.data, W = c.width, H = c.height;
+      const RADIUS = 6, STEP = 3;
+
+      const board = [];
+      for (let r = 0; r < GRID.rows; r++) {
+        const row = [];
+        for (let cIdx = 0; cIdx < GRID.cols; cIdx++) {
+          const cx = GRID.colXs[cIdx], cy = GRID.rowYs[r];
+          let nB = 0, nW = 0, nT = 0;
+          for (let dy = -RADIUS; dy <= RADIUS; dy += STEP) {
+            for (let dx = -RADIUS; dx <= RADIUS; dx += STEP) {
+              const x = cx + dx, y = cy + dy;
+              if (x < 0 || x >= W || y < 0 || y >= H) continue;
+              const i = (y * W + x) * 4;
+              const px = [data[i], data[i+1], data[i+2]];
+              if      (colorMatch(px, COLORS.black, 35)) nB++;
+              else if (colorMatch(px, COLORS.white, 25)) nW++;
+              nT++;
+            }
+          }
+          let val = 0;
+          if      (nB >= nT * 0.35) val = 1;
+          else if (nW >= nT * 0.35) val = 2;
+          row.push(val);
+        }
+        board.push(row);
+      }
+      return board;
+    }
+
+    // ─── Build engine payload ───
+    function countStones(snap) {
+      let x = 0, o = 0;
+      for (const row of snap) for (const cell of row) {
+        if (cell === 1) x++; else if (cell === 2) o++;
+      }
+      return { x, o };
+    }
+    // Build moves payload for the engine API.
+    // Player codes per spec: 1 = OWN (engine plays this side = user),
+    //                        2 = OPPONENT.
+    // We map the user's stone colour to "OWN" so the engine returns
+    // moves for the user's side. Default to user-as-black if userSide
+    // hasn't been detected yet.
+    function buildMovesFromBoard(snap) {
+      const userIsWhite = (userSide === 'O');
+      const blackPlayer = userIsWhite ? 2 : 1;
+      const whitePlayer = userIsWhite ? 1 : 2;
+      const xs = [], os = [];
+      for (let r = 0; r < snap.length; r++) {
+        for (let c = 0; c < snap[r].length; c++) {
+          if (snap[r][c] === 1) xs.push({ x: c, y: r, player: blackPlayer });
+          else if (snap[r][c] === 2) os.push({ x: c, y: r, player: whitePlayer });
+        }
+      }
+      // Per Gomocup convention the chronologically first stone is Black —
+      // interleave Black then White so the order matches.
+      const moves = [];
+      const n = Math.max(xs.length, os.length);
+      for (let i = 0; i < n; i++) {
+        if (i < xs.length) moves.push(xs[i]);
+        if (i < os.length) moves.push(os[i]);
+      }
+      return moves;
+    }
+
+    // NOTE: swap2 opening detection is currently disabled — the text
+    // regex was firing false positives (e.g. lobby/settings strings
+    // bleeding into .bcont). Engine doesn't truly support swap2 yet
+    // either, so for now we just analyse every position. Revisit when
+    // we wire a swap2-capable engine (Rapfi/Yixin) and find a robust
+    // DOM signal for the opening phase.
+
+    function analyzeBoard() {
+      if (!contextValid || analysisInFlight) return;
+      // (swap2 detection now runs from the poll tick — independent of
+      //  analysisInFlight gating — so it always fires regardless of
+      //  whether an in-flight analysis is stuck.)
+      const playersForId = detectPlayers();
+      if (playersForId && !userSide && playersForId.user?.side) {
+        userSide = playersForId.user.side;
+        console.log(TAG, 'user side:', userSide,
+          '(' + playersForId.user.name + ' vs ' + (playersForId.opponent?.name || '?') + ')',
+          playersForId.myName ? '— matched header name' : '— fallback');
+      }
+
+      if (!GRID) detectGrid();
+      if (!GRID) return;
+
+      const snap = snapshotBoard();
+      if (!snap) return;
+
+      const snapKey = JSON.stringify(snap);
+      if (snapKey === prevSnapshotKey) return;
+      prevSnapshotKey = snapKey;
+
+      // Refresh once more (cheap) so the next-block check sees the latest
+      const players = detectPlayers();
+
+      const { x, o } = countStones(snap);
+      const total = x + o;
+      // Prefer DOM-reported turn (from arrow indicator); fall back to parity.
+      const turn = players?.turn || ((x === o) ? 'X' : 'O');
+      const moves = buildMovesFromBoard(snap);
+
+      clearHighlight();
+      suggestedMove = null;
+
+      // Swap2 protocol: only the /swap2 endpoint understands the
+      // proposer / chooser decisions. It accepts exactly 0, 3 or 5
+      // stones — outside those checkpoints, the regular /move
+      // endpoint with rule=6 (free-swap2) handles the in-between
+      // moves. We only call /swap2 when:
+      //   • swap2 mode is on
+      //   • stone count is 0 / 3 / 5 (a protocol decision point)
+      //   • it's the user's turn (DOM arrow on user's panel)
+      //   • we don't already have queued moves to play
+      const isUserTurn = !!(players?.user?.isActive);
+      const atDecisionPoint = [0, 3, 5].includes(total);
+      const useSwap2 = swap2Mode && atDecisionPoint && isUserTurn &&
+                       pendingMoves.length === 0;
+
+      if (useSwap2) {
+        console.log(TAG, 'swap2 decision point — stones:', total,
+          'turn:', turn, 'userSide:', userSide || '(unknown)');
+        analysisInFlight = true;
+        safeSendMessage({
+          command: 'analyzeGomokuSwap2',
+          boardSize: GRID.cols,
+          moves,
+          platform: 'playok.com',
+        });
+        return;
+      }
+
+      console.log(TAG, 'board change — X:', x, 'O:', o, 'turn:', turn,
+        swap2Mode ? '(swap2 mode)' : '');
+
+      analysisInFlight = true;
+      safeSendMessage({
+        command: 'analyzeGomoku',
+        boardSize: GRID.cols,
+        moves, turn,
+        // During a swap2 game the regular /move calls (counts 1,2,4,>=6)
+        // should still use the swap2 rule code so renju constraints
+        // don't kick in. Background maps 'free-swap2' → 6.
+        rulePreference: swap2Mode ? 'free-swap2' : null,
+        platform: 'playok.com',
+        isRetry: false,
+      });
+    }
+
+    // Sequentially play queued moves with the user's configured delay.
+    // Used for /swap2 actions that return multiple stones at once
+    // (action='opening' = 3 stones, action='put_two' = 2 stones).
+    function playPendingMoves() {
+      if (pendingTimerId) { clearTimeout(pendingTimerId); pendingTimerId = null; }
+      if (!autoMode || !contextValid) return;
+      if (!pendingMoves.length) return;
+
+      // Drop moves that are already on the board (defensive — in case
+      // user manually placed one before we got here).
+      const snap = snapshotBoard();
+      if (snap) {
+        pendingMoves = pendingMoves.filter(m =>
+          !snap[m.y] || !snap[m.y][m.x]);
+      }
+      if (!pendingMoves.length) return;
+
+      chrome.storage.local.get('boardMasterState', (result) => {
+        const gs = result?.boardMasterState?.gomokuSettings || {};
+        const delay = gs.randomDelay
+          ? Math.floor(Math.random() *
+              ((gs.randomDelayMax || 5000) - (gs.randomDelayMin || 200) + 1)) +
+            (gs.randomDelayMin || 200)
+          : (gs.autoDelay || 1000);
+        pendingTimerId = setTimeout(() => {
+          if (!autoMode || !pendingMoves.length) return;
+          const m = pendingMoves.shift();
+          console.log(TAG, 'swap2 auto-play (' + (pendingMoves.length) +
+            ' more queued):', m);
+          clickCell(m.x, m.y);
+          if (pendingMoves.length) playPendingMoves();
+        }, delay);
+      });
+    }
+
+    // Find the playok swap button — appears for the chooser when the
+    // engine wants to take black. Selector is a best-effort guess; if
+    // it doesn't fire, log it and let the user click manually.
+    function clickSwapButton() {
+      // Likely candidates: a button or link near .tsinbo / .bcont
+      // labelled "swap" or with a swap icon. Without a confirmed DOM
+      // sample we just scan for clickable elements containing the text.
+      const candidates = Array.from(document.querySelectorAll(
+        '#appcont button, #appcont a, .bcont button, .bcont a, ' +
+        '.bcont [class*="butsys"], .bcont [class*="butsit"]'));
+      const swapBtn = candidates.find(el => {
+        const t = (el.textContent || '').trim().toLowerCase();
+        return t === 'swap' || t === 'swap colors' || t === 'switch';
+      });
+      if (swapBtn) {
+        console.log(TAG, 'clicking swap button:', swapBtn);
+        swapBtn.click();
+        return true;
+      }
+      console.warn(TAG, 'swap button not found — please click "swap" '
+        + 'manually. (Paste the button DOM so I can wire it.)');
+      return false;
+    }
+
+    // ─── Auto-play scheduling ───
+    function scheduleAutoPlay(col, row) {
+      if (autoTimerId) { clearTimeout(autoTimerId); autoTimerId = null; }
+      if (!autoMode) return;
+      if (userSide && currentTurn !== userSide) {
+        console.log(TAG, 'not user turn (' + currentTurn + ' vs ' + userSide + ') — skip auto-play');
+        return;
+      }
+      chrome.storage.local.get('boardMasterState', (result) => {
+        const gs = result?.boardMasterState?.gomokuSettings || {};
+        let delay;
+        if (gs.randomDelay) {
+          const min = gs.randomDelayMin || 200;
+          const max = gs.randomDelayMax || 5000;
+          delay = Math.floor(Math.random() * (max - min + 1)) + min;
+        } else {
+          delay = gs.autoDelay || 1000;
+        }
+        console.log(TAG, 'auto-play in', delay + 'ms', gs.randomDelay ? '(random)' : '');
+        autoTimerId = setTimeout(() => { if (autoMode) clickCell(col, row); }, delay);
+      });
+    }
+
+    // ─── Highlight ───
+    // X = black stone, O = white. Border matches the stone colour and
+    // we add a contrasting box-shadow ring so the hint stays visible
+    // against the brown wood background.
+    function highlightCell(col, row) {
+      clearHighlight();
+      suggestedMove = { x: col, y: row };
+      if (!hintsVisible || !GRID) return;
+      const c = findBoardCanvas();
+      if (!c) return;
+      const rect = c.getBoundingClientRect();
+      const sx = rect.width / c.width, sy = rect.height / c.height;
+      const cx = (GRID.x0 + col * GRID.cellW) * sx;
+      const cy = (GRID.y0 + row * GRID.cellH) * sy;
+      const size = Math.max(20, GRID.cellW * sx * 0.85);
+      const isX = currentTurn === 'X';
+
+      const border  = isX ? '#000' : '#fff';
+      const fill    = isX ? 'rgba(0,0,0,0.32)' : 'rgba(255,255,255,0.45)';
+      const contrast= isX ? '#fff' : '#000';
+
+      highlightEl = document.createElement('div');
+      highlightEl.style.cssText = [
+        'position:fixed', 'pointer-events:none', 'z-index:99999',
+        'left:'   + (rect.left + cx - size / 2) + 'px',
+        'top:'    + (rect.top  + cy - size / 2) + 'px',
+        'width:'  + size + 'px',
+        'height:' + size + 'px',
+        'border-radius:50%',
+        'border:3px solid ' + border,
+        'background:' + fill,
+        'box-shadow:0 0 0 2px ' + contrast + ', 0 0 6px rgba(0,0,0,0.35)',
+        'animation:bm-gomoku-pulse 1.2s ease-in-out infinite',
+      ].join(';');
+      document.body.appendChild(highlightEl);
+    }
+    function clearHighlight() {
+      if (highlightEl) { highlightEl.remove(); highlightEl = null; }
+    }
+
+    // ─── Click (used later by auto-play once user-side detection lands) ───
+    function clickCell(col, row) {
+      if (!GRID) return;
+      const c = findBoardCanvas();
+      if (!c) return;
+      const rect = c.getBoundingClientRect();
+      const sx = rect.width / c.width, sy = rect.height / c.height;
+      const clientX = rect.left + GRID.colXs[col] * sx;
+      const clientY = rect.top  + GRID.rowYs[row] * sy;
+      const target = findInputLayer() || c;
+      const init = {
+        bubbles: true, cancelable: true, view: window, composed: true,
+        clientX, clientY, screenX: clientX, screenY: clientY,
+        button: 0, buttons: 1,
+      };
+      try { target.dispatchEvent(new PointerEvent('pointerdown',
+        Object.assign({ pointerType: 'mouse', isPrimary: true }, init))); } catch (_) {}
+      target.dispatchEvent(new MouseEvent('mousedown', init));
+      const upInit = Object.assign({}, init, { buttons: 0 });
+      try { target.dispatchEvent(new PointerEvent('pointerup',
+        Object.assign({ pointerType: 'mouse', isPrimary: true }, upInit))); } catch (_) {}
+      target.dispatchEvent(new MouseEvent('mouseup', upInit));
+      target.dispatchEvent(new MouseEvent('click', upInit));
+    }
+
+    // ─── CSS for hint pulse ───
+    function injectStyles() {
+      if (document.querySelector('#bm-gomoku-styles')) return;
+      const style = document.createElement('style');
+      style.id = 'bm-gomoku-styles';
+      style.textContent =
+        '@keyframes bm-gomoku-pulse {' +
+        '  0%,100% { opacity: 1; transform: scale(1); }' +
+        '  50%     { opacity: .55; transform: scale(.88); }' +
+        '}';
+      (document.head || document.documentElement).appendChild(style);
+    }
+
+    // ─── Init flow ───
+    function tryInit() {
+      const c = findBoardCanvas();
+      if (!c) return false;
+      if (c === boardCanvas) return true;
+
+      boardCanvas = c;
+      injectStyles();
+
+      if (!notifiedGameDetected) {
+        notifiedGameDetected = true;
+        safeSendMessage({ command: 'gameDetected', gameType: 'gomoku', platform: 'playok.com' });
+      }
+
+      if (resizeObserver) resizeObserver.disconnect();
+      resizeObserver = new ResizeObserver(() => {
+        if (!contextValid) return;
+        if (!boardCanvas) return;
+        // Only invalidate when the intrinsic canvas dimensions actually
+        // changed — getBoundingClientRect jitter from ancestor reflows
+        // must NOT clobber a valid grid.
+        if (boardCanvas.width !== GRID?.canvasW || boardCanvas.height !== GRID?.canvasH) {
+          console.log(TAG, 'resize → invalidate grid');
+          GRID = null; prevSnapshotKey = '';
+          // Clear stale-coord highlight; detectGrid() will re-render at
+          // the new coords on its next run because we kept suggestedMove.
+          clearHighlight();
+          // Re-detect promptly (don't wait for the next 500ms poll if
+          // we're mid-analysis with analysisInFlight=true).
+          setTimeout(() => { if (!GRID) detectGrid(); }, 100);
+        }
+      });
+      resizeObserver.observe(c);
+
+      // First detect after canvas finishes drawing
+      setTimeout(() => { detectGrid(); analyzeBoard(); }, 1500);
+      return true;
+    }
+
+    if (!tryInit() && document.body) {
+      const obs = new MutationObserver(() => {
+        if (!contextValid) { obs.disconnect(); return; }
+        if (tryInit()) {
+          // keep observer running — board can be rebuilt across matches
+        }
+      });
+      obs.observe(document.body, { childList: true, subtree: true });
+    }
+
+    // Polling — canvas mutations don't fire DOM events so we tick.
+    // Swap2 detection runs FIRST (and unconditionally) so we can see
+    // banner state changes even while an analysis is in flight or while
+    // the board canvas is still loading.
+    pollIntervalId = setInterval(() => {
+      if (!contextValid) { clearInterval(pollIntervalId); return; }
+      refreshSwap2Flag();
+      if (!boardCanvas || !document.contains(boardCanvas)) {
+        boardCanvas = null; GRID = null; prevSnapshotKey = '';
+        tryInit();
+        return;
+      }
+      analyzeBoard();
+    }, 500);
+
+    // Message listener
+    chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+      switch (msg.command) {
+        case 'getFEN':
+          prevSnapshotKey = '';
+          analyzeBoard();
+          sendResponse({ ok: true });
+          break;
+
+        case 'updateGomokuHints':
+          analysisInFlight = false;
+          if (msg.turn) currentTurn = msg.turn;
+          console.log(TAG, 'hint:', msg.move, 'turn:', currentTurn);
+          if (msg.move && GRID &&
+              msg.move.x < GRID.cols && msg.move.y < GRID.rows) {
+            highlightCell(msg.move.x, msg.move.y);
+            if (autoMode) scheduleAutoPlay(msg.move.x, msg.move.y);
+          }
+          break;
+
+        case 'updateGomokuSwap2':
+          analysisInFlight = false;
+          console.log(TAG, 'swap2 →', msg.action,
+            'engine:', msg.engineTime, msg);
+          pendingMoves = [];
+          if (pendingTimerId) { clearTimeout(pendingTimerId); pendingTimerId = null; }
+          switch (msg.action) {
+            case 'opening':    // 3 stones (proposer)
+            case 'put_two': {  // 2 balancing stones (chooser)
+              const list = (msg.moves || []).filter(m =>
+                GRID && m.x < GRID.cols && m.y < GRID.rows);
+              if (!list.length) break;
+              pendingMoves = list.slice();
+              // Highlight the first stone as the immediate hint
+              highlightCell(list[0].x, list[0].y);
+              if (autoMode) playPendingMoves();
+              break;
+            }
+            case 'move': {     // engine keeps colour and plays one stone
+              if (msg.move && GRID &&
+                  msg.move.x < GRID.cols && msg.move.y < GRID.rows) {
+                highlightCell(msg.move.x, msg.move.y);
+                if (autoMode) scheduleAutoPlay(msg.move.x, msg.move.y);
+              }
+              break;
+            }
+            case 'swap': {     // engine wants to take the other colour
+              if (autoMode) clickSwapButton();
+              else console.log(TAG, 'engine suggests SWAP — click "swap" '
+                + 'on playok or enable auto-play to do it automatically');
+              break;
+            }
+            default:
+              console.warn(TAG, 'unknown swap2 action:', msg.action);
+          }
+          break;
+
+        case 'analysisError':
+          analysisInFlight = false;
+          console.log(TAG, 'analysis error:', msg.error);
+          break;
+
+        case 'analysisStarted': break;
+
+        case 'startAuto':
+          autoMode = true;
+          console.log(TAG, 'auto-play ON — userSide:', userSide || '(detect on next move)');
+          safeSendMessage({ command: 'autoStatus', status: 'running' });
+          if (suggestedMove) scheduleAutoPlay(suggestedMove.x, suggestedMove.y);
+          prevSnapshotKey = '';   // force re-analyze
+          analyzeBoard();
+          break;
+
+        case 'stopAuto':
+          autoMode = false;
+          if (autoTimerId) { clearTimeout(autoTimerId); autoTimerId = null; }
+          console.log(TAG, 'auto-play OFF');
+          safeSendMessage({ command: 'autoStatus', status: 'stopped' });
+          break;
+
+        case 'toggleHints':
+          hintsVisible = msg.visible !== undefined ? msg.visible : !hintsVisible;
+          if (!hintsVisible) clearHighlight();
+          else if (suggestedMove) highlightCell(suggestedMove.x, suggestedMove.y);
+          break;
+
+        case 'ping':
+          sendResponse({ ok: true });
+          break;
+      }
+    });
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  //  Playok Gomoku — Debug / Reverse-engineering helpers
+  //
+  //  Board on playok is a <canvas>, not a DOM grid. Before we can
+  //  read the position we need to figure out:
+  //    • which canvas holds the board (there are multiple layers)
+  //    • the grid origin + cell size in pixel space
+  //    • where stones live (separate canvas? same canvas?)
+  //    • whether playok exposes any game state on window.*
+  //
+  //  Implementation: inject content/gomoku-playok-debug.js into the
+  //  page's MAIN world via a <script src> tag so window.bmGomokuDebug
+  //  is reachable from the page console (content scripts live in an
+  //  isolated world, so anything they put on window won't be visible
+  //  to the user typing into the regular console context).
+  // ═══════════════════════════════════════════════════════════════
+  function initPlayokDebug() {
+    const url = chrome.runtime.getURL('content/gomoku-playok-debug.js');
+    const s = document.createElement('script');
+    s.src = url;
+    s.onload = () => s.remove();
+    s.onerror = (e) => console.warn('[BM][gomoku][playok-debug] inject failed', e);
+    (document.head || document.documentElement).appendChild(s);
+    console.log('[BM][gomoku][playok-debug] injected', url);
+  }
 
   // ═══════════════════════════════════════════════════════════════
   //  Facebook Caro

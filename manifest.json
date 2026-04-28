@@ -61,6 +61,12 @@
       "run_at": "document_idle"
     }
   ],
+  "web_accessible_resources": [
+    {
+      "resources": ["content/gomoku-playok-debug.js"],
+      "matches": ["https://www.playok.com/*"]
+    }
+  ],
   "commands": {
     "toggle-hints": {
       "suggested_key": { "default": "Alt+H" },
