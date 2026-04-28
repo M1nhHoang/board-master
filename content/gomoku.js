@@ -75,7 +75,7 @@
   // ═══════════════════════════════════════════════════════════════
   function initPlayokGomoku() {
     const TAG = '[BM][gomoku][playok]';
-    console.log(TAG, 'init [v5-swap2-direct-sel]');
+    console.log(TAG, 'init [v6-offscreen-readback]');
 
     const COLORS = {
       empty:    { r: 240, g: 176, b: 96  },
@@ -235,16 +235,38 @@
       return { user, opponent, turn, myName, candidates };
     }
 
+    // ─── Pixel readback ───
+    // Playok already created its 2D context without willReadFrequently,
+    // so passing the flag to a later getContext() call has no effect —
+    // browsers warn about slow readback. Workaround: blit the playok
+    // canvas onto our own offscreen canvas (created WITH the flag) and
+    // read pixels from there.
+    let offCanvas = null;
+    let offCtx    = null;
+    function readCanvasPixels(c) {
+      try {
+        if (!offCanvas || offCanvas.width !== c.width || offCanvas.height !== c.height) {
+          offCanvas = document.createElement('canvas');
+          offCanvas.width  = c.width;
+          offCanvas.height = c.height;
+          offCtx = offCanvas.getContext('2d', { willReadFrequently: true });
+        }
+        offCtx.clearRect(0, 0, offCanvas.width, offCanvas.height);
+        offCtx.drawImage(c, 0, 0);
+        return offCtx.getImageData(0, 0, c.width, c.height);
+      } catch (e) {
+        console.warn(TAG, 'pixel readback failed:', e.message);
+        return null;
+      }
+    }
+
     // ─── Grid detection (auto-extrapolated) ───
     function detectGrid() {
       const c = findBoardCanvas();
       if (!c) return null;
 
-      let img;
-      try {
-        img = c.getContext('2d', { willReadFrequently: true })
-              .getImageData(0, 0, c.width, c.height);
-      } catch (e) { console.warn(TAG, 'getImageData failed:', e.message); return null; }
+      const img = readCanvasPixels(c);
+      if (!img) return null;
       const data = img.data, W = c.width, H = c.height;
 
       const rowCounts = new Array(H).fill(0);
@@ -368,11 +390,8 @@
         GRID = null; prevSnapshotKey = ''; clearHighlight();
         return null;
       }
-      let img;
-      try {
-        img = c.getContext('2d', { willReadFrequently: true })
-              .getImageData(0, 0, c.width, c.height);
-      } catch (e) { return null; }
+      const img = readCanvasPixels(c);
+      if (!img) return null;
       const data = img.data, W = c.width, H = c.height;
       const RADIUS = 6, STEP = 3;
 

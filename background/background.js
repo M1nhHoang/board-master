@@ -224,7 +224,8 @@ async function ensureContentScripts(tabId, url) {
   const chessComMatch = url.startsWith('https://www.chess.com/');
   const lichessMatch  = url.startsWith('https://lichess.org/');
   const facebookCaroMatch = (url.includes('facebook.com') && url.includes('/gaming/play/')) || url.includes('fbsbx.com');
-  if (!chessComMatch && !lichessMatch && !facebookCaroMatch) return false;
+  const playokGomokuMatch = /^https:\/\/www\.playok\.com\/[^/]+\/gomoku(\/|$|#|\?)/i.test(url);
+  if (!chessComMatch && !lichessMatch && !facebookCaroMatch && !playokGomokuMatch) return false;
 
   try {
     // Test if content script is already there
@@ -236,9 +237,9 @@ async function ensureContentScripts(tabId, url) {
 
   console.log('[BM][bg] Injecting content scripts into tab', tabId);
   try {
-    if (facebookCaroMatch) {
+    if (facebookCaroMatch || playokGomokuMatch) {
       await chrome.scripting.executeScript({
-        target: { tabId, allFrames: true },
+        target: { tabId, allFrames: facebookCaroMatch },
         files: ['content/gomoku.js'],
       });
     } else {

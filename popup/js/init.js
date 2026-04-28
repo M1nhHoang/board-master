@@ -120,13 +120,15 @@ async function init() {
 
     const url = tab.url;
     const isChessSite = url.includes('chess.com') || url.includes('lichess.org');
-    const isGomokuSite = url.includes('facebook.com/gaming/play/');
+    const isFacebookCaro = url.includes('facebook.com/gaming/play/');
+    const isPlayokGomoku = /https:\/\/www\.playok\.com\/[^/]+\/gomoku(\/|$|#|\?)/i.test(url);
+    const isGomokuSite = isFacebookCaro || isPlayokGomoku;
 
     if (isGomokuSite && tab.id) {
       console.log('[BM][popup] On gomoku site:', url);
       state.connected = true;
       state.gameType = 'gomoku';
-      state.platform = 'facebook-caro';
+      state.platform = isPlayokGomoku ? 'playok.com' : 'facebook-caro';
       saveState();
       navigateTo('main');
 
