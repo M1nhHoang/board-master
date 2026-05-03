@@ -13,6 +13,20 @@ function updateMainView() {
   $('#gomoku-rule-section').style.display = isChess ? 'none' : '';
   $('#hints-title').textContent = isChess ? 'HINTS' : 'HINT';
 
+  // Sync rule dropdown selection + label with current state. Without
+  // this, the hardcoded "selected" on Freestyle in popup.html persists
+  // even when the user (or migration) changed gomokuRule to something
+  // else.
+  if (!isChess) {
+    const ruleLabel = $('#rule-dropdown-label');
+    if (ruleLabel) {
+      ruleLabel.textContent = `Rule: ${capitalize(state.gomokuRule)}`;
+    }
+    document.querySelectorAll('#rule-dropdown-menu .dropdown-item').forEach(item => {
+      item.classList.toggle('selected', item.dataset.rule === state.gomokuRule);
+    });
+  }
+
   const hintsOn = state.hintsOn;
   $('#chess-hints-card').style.display = (isChess && hintsOn) ? '' : 'none';
   $('#gomoku-hint-card').style.display = (!isChess && hintsOn) ? '' : 'none';
@@ -81,6 +95,39 @@ function renderChessHints() {
 function renderGomokuHint() {
   const turn = state.gomokuTurn || '?';
   const label = turn === 'X' ? 'X (Black)' : turn === 'O' ? 'O (White)' : '?';
-  $('#gomoku-hint-pos').textContent = `${label} → ${state.gomokuHintPos}`;
+  const swap2Advice = swap2AdviceText();
+  if (swap2Advice) {
+    $('#gomoku-hint-pos').textContent = swap2Advice;
+  } else {
+    $('#gomoku-hint-pos').textContent = `${label} → ${state.gomokuHintPos}`;
+  }
   $('#gomoku-hint-engine').textContent = `Engine: ${state.gomokuEngineTime}`;
+}
+
+// Map a /swap2 protocol decision to a short advice line:
+//   stoneCount=0           → we're proposer, place 3 opening stones
+//   stoneCount=3, swap     → we're chooser; pick BLACK (click swap)
+//   stoneCount=3, move     → we're chooser; keep WHITE, play stone 4
+//   stoneCount=3, put_two  → we're chooser; place 2 balancing stones
+//                            (proposer picks colour next)
+//   stoneCount=5, swap     → we're proposer; SWAP colours (click swap)
+//   stoneCount=5, move     → we're proposer; keep colour, play stone 6
+function swap2AdviceText() {
+  const a = state.gomokuSwap2Action;
+  const n = state.gomokuSwap2StoneCount;
+  if (!a) return '';
+  const tail = state.gomokuHintPos ? ` → ${state.gomokuHintPos}` : '';
+  if (n === 0 && a === 'opening') {
+    return `Place 3 opening stones${tail}`;
+  }
+  if (n === 3) {
+    if (a === 'swap')    return 'Pick BLACK — click "swap" on Playok';
+    if (a === 'move')    return `Keep WHITE — play stone 4${tail}`;
+    if (a === 'put_two') return `Place 2 balancing stones${tail}`;
+  }
+  if (n === 5) {
+    if (a === 'swap')    return 'SWAP colours — click "swap" on Playok';
+    if (a === 'move')    return `Keep colour — play stone 6${tail}`;
+  }
+  return '';
 }

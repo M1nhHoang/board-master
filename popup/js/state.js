@@ -59,6 +59,13 @@ const DEFAULT_STATE = {
   gomokuAutoNext: '',
   gomokuAutoCountdown: 0,
   gomokuAutoCountdownPercent: 0,
+  // Swap2 protocol decision from the engine. action ∈
+  // {'opening','swap','move','put_two', ''}; stoneCount = 0/3/5
+  // (the protocol step we acted at). Used by the popup to surface
+  // a colour-choice recommendation in addition to the board-cell
+  // highlight.
+  gomokuSwap2Action: '',
+  gomokuSwap2StoneCount: 0,
 };
 
 let state = {};
@@ -92,6 +99,23 @@ function loadState() {
       state.gomokuAutoNext = '';
       state.gomokuAutoCountdown = 0;
       state.gomokuAutoCountdownPercent = 0;
+      state.gomokuSwap2Action = '';
+      state.gomokuSwap2StoneCount = 0;
+
+      // Migrate legacy rule keys from before the spec rename:
+      //   'standard-renju' \u2192 'standard' (rule 1 = Standard Gomoku, no overline)
+      //   'free-renju'     \u2192 'renju'    (rule 2 = Renju, black restricted)
+      const RULE_MIGRATE = { 'standard-renju': 'standard', 'free-renju': 'renju' };
+      if (RULE_MIGRATE[state.gomokuRule]) state.gomokuRule = RULE_MIGRATE[state.gomokuRule];
+      if (RULE_MIGRATE[state.gomokuSettings.defaultRule]) {
+        state.gomokuSettings.defaultRule = RULE_MIGRATE[state.gomokuSettings.defaultRule];
+      }
+      // Sync session rule with persisted default. If they drifted apart
+      // (older builds let the two dropdowns set independent fields)
+      // prefer defaultRule since that's the user's persisted choice.
+      if (state.gomokuSettings.defaultRule && state.gomokuRule !== state.gomokuSettings.defaultRule) {
+        state.gomokuRule = state.gomokuSettings.defaultRule;
+      }
 
       console.log('[BM][popup] State loaded:', JSON.stringify(state, null, 2));
       resolve();

@@ -71,6 +71,9 @@ chrome.runtime.onMessage.addListener((msg) => {
     }
     if (msg.engineTime) state.gomokuEngineTime = msg.engineTime;
     if (msg.totalMoves !== undefined) state.gomokuStones = msg.totalMoves;
+    // Regular /move response → not in a swap2 decision phase any more.
+    state.gomokuSwap2Action = '';
+    state.gomokuSwap2StoneCount = 0;
 
     saveState();
     if (state.view === 'main') updateMainView();
@@ -78,6 +81,27 @@ chrome.runtime.onMessage.addListener((msg) => {
       updateAutoView();
       if (state.autoMode) startGomokuAutoCountdown();
     }
+  }
+
+  if (msg.command === 'updateGomokuSwap2') {
+    state.analyzing = false;
+    state.lastError = '';
+    state.gomokuSwap2Action = msg.action || '';
+    state.gomokuSwap2StoneCount = msg.stoneCount || 0;
+    if (msg.engineTime) state.gomokuEngineTime = msg.engineTime;
+    // First proposed/highlighted stone (if any) — for actions that
+    // produce a single move ('move') or a list ('opening'/'put_two')
+    // surface its coords so renderGomokuHint can show them.
+    const firstMove = msg.move || (msg.moves && msg.moves[0]) || null;
+    if (firstMove) {
+      const col = String.fromCharCode(65 + firstMove.x);
+      const row = firstMove.y + 1;
+      state.gomokuHintPos = col + row;
+    } else {
+      state.gomokuHintPos = '';
+    }
+    saveState();
+    if (state.view === 'main') updateMainView();
   }
 
   if (msg.command === 'updateAuto') {

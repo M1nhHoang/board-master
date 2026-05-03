@@ -6,14 +6,15 @@ import { buildUpdateMessage } from './evaluation.js';
 
 function ruleNameToNumber(name) {
   const map = {
+    // Per /move spec: 0=Freestyle (5+ wins), 1=Standard (exactly 5,
+    // no overline), 2=Free Renju (black restricted).
     'freestyle':       0,
-    'standard-renju':  1,
+    'standard':        1,
+    'renju':           2,
+    // Legacy keys — kept so users with older saved settings still
+    // resolve to the correct rule number after spec rename.
+    'standard-renju':  1,   // old label, now means "Standard Gomoku"
     'free-renju':      2,
-    // Freestyle main rule + swap opening protocol. Use these rule
-    // codes for /move during the opening; the dedicated /swap2
-    // endpoint drives the actual swap-protocol decisions.
-    'free-swap1':      5,
-    'free-swap2':      6,
   };
   return map[name] ?? 0;
 }
@@ -48,25 +49,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           console.log('[BM][bg] API response:', JSON.stringify(apiResult));
           const update = buildUpdateMessage(apiResult, settings, msg.fen);
           console.log('[BM][bg] Sending updateHints:', JSON.stringify(update));
-          safeSend(update);
-          // Forward to content script — either the sender tab or the active tab
-          if (sender.tab?.id) {
-            chrome.tabs.sendMessage(sender.tab.id, update).catch(() => {});
-          } else {
-            // Request came from popup — send to active tab
-            chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-              if (tabs[0]?.id) {
-                chrome.tabs.sendMessage(tabs[0].id, update).catch(() => {});
-              }
-            });
-          }
+          sendToPopupAndSender(update, sender);
         })
         .catch((err) => {
           console.error('[BM][bg] API error:', err);
-          safeSend({
+          sendToPopupAndSender({
             command: 'analysisError',
             error: err.message || 'API request failed',
-          });
+          }, sender);
         });
     });
     return false;
@@ -93,37 +83,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         .then((apiResult) => {
           console.log('[BM][bg] Gomoku API response:', JSON.stringify(apiResult));
           if (apiResult.success && apiResult.move) {
-            const update = {
+            sendToPopupAndSender({
               command: 'updateGomokuHints',
               move: apiResult.move,
               turn: msg.turn || 'X',
               engineTime: (apiResult.engineTime || 0) + 'ms',
               totalMoves: msg.moves?.length || 0,
               isRetry: msg.isRetry || false,
-            };
-            safeSend(update);
-            if (sender.tab?.id) {
-              chrome.tabs.sendMessage(sender.tab.id, update).catch(() => {});
-            } else {
-              chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-                if (tabs[0]?.id) {
-                  chrome.tabs.sendMessage(tabs[0].id, update).catch(() => {});
-                }
-              });
-            }
+            }, sender);
           } else {
-            safeSend({
+            sendToPopupAndSender({
               command: 'analysisError',
               error: apiResult.error || 'Gomoku engine returned no move',
-            });
+            }, sender);
           }
         })
         .catch((err) => {
           console.error('[BM][bg] Gomoku API error:', err);
-          safeSend({
+          sendToPopupAndSender({
             command: 'analysisError',
             error: err.message || 'Gomoku API request failed',
-          });
+          }, sender);
         });
     });
     return false;
@@ -145,35 +125,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         .then((apiResult) => {
           console.log('[BM][bg] Gomoku swap2 response:', JSON.stringify(apiResult));
           if (!apiResult.success) {
-            safeSend({
+            sendToPopupAndSender({
               command: 'analysisError',
               error: apiResult.error || 'swap2 engine returned no decision',
-            });
+            }, sender);
             return;
           }
-          const update = {
+          sendToPopupAndSender({
             command: 'updateGomokuSwap2',
             action: apiResult.action,                      // opening|swap|move|put_two
             move:   apiResult.move  || null,               // when action === 'move'
             moves:  apiResult.moves || [],                 // when action === 'opening' | 'put_two'
             engineTime: (apiResult.engineTime || 0) + 'ms',
             stoneCount: msg.moves?.length || 0,
-          };
-          safeSend(update);
-          if (sender.tab?.id) {
-            chrome.tabs.sendMessage(sender.tab.id, update).catch(() => {});
-          } else {
-            chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-              if (tabs[0]?.id) chrome.tabs.sendMessage(tabs[0].id, update).catch(() => {});
-            });
-          }
+          }, sender);
         })
         .catch((err) => {
           console.error('[BM][bg] Gomoku swap2 API error:', err);
-          safeSend({
+          sendToPopupAndSender({
             command: 'analysisError',
             error: err.message || 'Gomoku swap2 API request failed',
-          });
+          }, sender);
         });
     });
     return false;
@@ -215,6 +187,22 @@ function broadcastToContentScripts(message) {
       chrome.tabs.sendMessage(tabs[0].id, message);
     }
   });
+}
+
+// Send a message to BOTH the popup (via runtime) and the content
+// script that triggered the request (via tabs API). Critical for
+// updates and errors: if we only send to popup, the content
+// script's analysisInFlight stays true forever and it stops
+// re-analyzing — the user sees the hint freeze.
+function sendToPopupAndSender(message, sender) {
+  safeSend(message);
+  if (sender?.tab?.id) {
+    chrome.tabs.sendMessage(sender.tab.id, message).catch(() => {});
+  } else {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (tabs[0]?.id) chrome.tabs.sendMessage(tabs[0].id, message).catch(() => {});
+    });
+  }
 }
 
 // Inject content scripts into a tab that doesn't have them yet

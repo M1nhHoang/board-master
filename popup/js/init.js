@@ -25,12 +25,20 @@ function setupRuleDropdown() {
 
   menu.querySelectorAll('.dropdown-item').forEach(item => {
     item.addEventListener('click', () => {
+      // Update both gomokuRule (session) and defaultRule (persisted)
+      // so the two dropdowns stay in sync — see settings.js for the
+      // mirror handler.
       state.gomokuRule = item.dataset.rule;
+      state.gomokuSettings.defaultRule = item.dataset.rule;
       menu.querySelectorAll('.dropdown-item').forEach(i => i.classList.remove('selected'));
       item.classList.add('selected');
       $('#rule-dropdown-label').textContent = `Rule: ${capitalize(state.gomokuRule)}`;
       menu.classList.remove('open');
       saveState();
+      // Force the content script to re-analyse with the new rule
+      // immediately — otherwise the existing hint stays stale until
+      // the next stone is placed.
+      sendToActiveTab({ command: 'getFEN' });
     });
   });
 }

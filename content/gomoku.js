@@ -75,7 +75,7 @@
   // ═══════════════════════════════════════════════════════════════
   function initPlayokGomoku() {
     const TAG = '[BM][gomoku][playok]';
-    console.log(TAG, 'init [v6-offscreen-readback]');
+    console.log(TAG, 'init [v8-banner-restored]');
 
     const COLORS = {
       empty:    { r: 240, g: 176, b: 96  },
@@ -94,6 +94,7 @@
     let suggestedMove    = null;
     let hintsVisible     = true;
     let highlightEl      = null;
+    let swap2BannerEl    = null;
     let analysisInFlight = false;
     let pollIntervalId   = null;
     let resizeObserver   = null;
@@ -142,6 +143,33 @@
       if (pendingTimerId)  { clearTimeout(pendingTimerId); pendingTimerId = null; }
       pendingMoves = [];
       clearHighlight();
+      clearSwap2Banner();
+    }
+
+    // Visible on-page banner for swap2 protocol decisions (the engine
+    // returns `swap` / `put_two` / etc. — protocol moves that aren't a
+    // single board cell so highlightCell alone can't convey them). The
+    // banner sits above the board and is auto-cleared by analyzeBoard
+    // when the protocol settles into regular play.
+    function showSwap2Banner(text, bg) {
+      clearSwap2Banner();
+      if (!hintsVisible) return;
+      swap2BannerEl = document.createElement('div');
+      swap2BannerEl.style.cssText = [
+        'position:fixed', 'z-index:99999', 'pointer-events:none',
+        'top:60px', 'left:50%', 'transform:translateX(-50%)',
+        'padding:10px 16px', 'border-radius:8px',
+        'background:' + (bg || 'rgba(0,0,0,0.85)'),
+        'color:#fff', 'font:600 14px/1.3 system-ui,sans-serif',
+        'box-shadow:0 4px 14px rgba(0,0,0,0.45)',
+        'max-width:90vw', 'text-align:center',
+        'animation:bm-gomoku-pulse 1.6s ease-in-out infinite',
+      ].join(';');
+      swap2BannerEl.textContent = text;
+      document.body.appendChild(swap2BannerEl);
+    }
+    function clearSwap2Banner() {
+      if (swap2BannerEl) { swap2BannerEl.remove(); swap2BannerEl = null; }
     }
 
     // Detect swap2 from playok's table-info banner. Direct selector
@@ -655,8 +683,56 @@
       // canvas pixels are identical and analyzeBoard would return
       // early forever after the swap.
       const turnKey = playersForId?.turn || '';
-      const snapKey = JSON.stringify(snap) + '|t=' + turnKey + '|u=' + userSide;
+      const snapJSON = JSON.stringify(snap);
+      const snapKey = snapJSON + '|t=' + turnKey + '|u=' + userSide;
       if (!sideChanged && snapKey === prevSnapshotKey) return;
+
+      // ─── DEBUG: snap-key change diagnostics ───
+      // When the key changes we'll fire an /move or /swap2 — too many
+      // changes per second = "spam". Break down WHAT changed (stone
+      // pixels vs turn vs userSide) and count cells that flipped, so
+      // we can tell pixel-noise from real game progression.
+      if (prevSnapshotKey) {
+        const prevSnap = analyzeBoard._lastSnap || null;
+        let cellChanges = -1;
+        if (prevSnap && prevSnap.length === snap.length) {
+          let diff = 0;
+          for (let r = 0; r < snap.length; r++) {
+            for (let c = 0; c < snap[r].length; c++) {
+              if (prevSnap[r][c] !== snap[r][c]) diff++;
+            }
+          }
+          cellChanges = diff;
+        }
+        const prevTurn = analyzeBoard._lastTurnKey;
+        const prevUser = analyzeBoard._lastUserKey;
+        const turnChanged = prevTurn !== turnKey;
+        const userChanged = prevUser !== userSide;
+        const reasons = [];
+        if (cellChanges > 0)  reasons.push('pixels(' + cellChanges + ')');
+        if (cellChanges === 0 && (turnChanged || userChanged)) reasons.push('soft-flip');
+        if (turnChanged) reasons.push('turn:' + (prevTurn || '-') + '→' + (turnKey || '-'));
+        if (userChanged) reasons.push('user:' + (prevUser || '-') + '→' + (userSide || '-'));
+
+        // Rate counter: count key-changes per 5s window.
+        const _t = Date.now();
+        if (!analyzeBoard._rateWindowStart || _t - analyzeBoard._rateWindowStart > 5000) {
+          if (analyzeBoard._rateCount > 0) {
+            console.log(TAG, '[debug] snapKey change rate: ' + analyzeBoard._rateCount +
+              ' in last ' + ((_t - analyzeBoard._rateWindowStart) / 1000).toFixed(1) + 's');
+          }
+          analyzeBoard._rateWindowStart = _t;
+          analyzeBoard._rateCount = 0;
+        }
+        analyzeBoard._rateCount = (analyzeBoard._rateCount || 0) + 1;
+
+        console.log(TAG, '[debug] snapKey changed —', reasons.join(' '),
+          '| total=' + (snap.flat().filter(v => v).length));
+      }
+      analyzeBoard._lastSnap = snap.map(row => row.slice());
+      analyzeBoard._lastTurnKey = turnKey;
+      analyzeBoard._lastUserKey = userSide;
+
       prevSnapshotKey = snapKey;
 
       // Refresh once more (cheap) so the next-block check sees the latest
@@ -668,12 +744,21 @@
       const turn = players?.turn || ((x === o) ? 'X' : 'O');
       const moves = buildMovesFromBoard(snap);
 
-      // Reset swap2 protocol state on a fresh board (new game).
-      if (total === 0 && (swap2OpeningResolved || pendingMoves.length > 0)) {
+      // Reset swap2 protocol state on a fresh board (new game), but
+      // ONLY when the board went from a non-empty state back to empty
+      // (real game restart). Without this guard the very first analyze
+      // after /swap2 'opening' returns also matches `total === 0` and
+      // would wipe the 3 pendingMoves we just queued.
+      if (analyzeBoard._highestTotalSeen == null) analyzeBoard._highestTotalSeen = 0;
+      if (total > analyzeBoard._highestTotalSeen) {
+        analyzeBoard._highestTotalSeen = total;
+      }
+      if (total === 0 && analyzeBoard._highestTotalSeen > 0) {
         console.log(TAG, 'swap2 protocol state reset (new game) — clearing',
           pendingMoves.length, 'pending moves');
         swap2OpeningResolved = false;
         pendingMoves = [];
+        analyzeBoard._highestTotalSeen = 0;
       }
       // A userSide flip is the signature of opp's swap2 'swap' action.
       // Whatever stones we had queued were planned under the old colour
@@ -692,8 +777,12 @@
         }
       }
 
-      clearHighlight();
-      suggestedMove = null;
+      // (Don't preemptively clearHighlight here — keep the existing
+      // hint visible until the new analysis returns. highlightCell is
+      // idempotent for matching coords and replaces atomically when
+      // the next stone differs. Removing then re-adding the same
+      // element causes a visible flicker on every re-analyze, which
+      // happens whenever userSide flips even with snap unchanged.)
 
       // If we have queued moves from a prior /swap2 result (opening = 3
       // stones, put_two = 2 stones) and the user just placed one of
@@ -769,12 +858,12 @@
         command: 'analyzeGomoku',
         boardSize: GRID.cols,
         moves, turn,
-        // /move only accepts rule ∈ {0,1,2}; rule=6 (free-swap2) is
-        // /swap2-only. During a swap2 game's regular play (counts
-        // 1,2,4,≥6) we use rule=0 (freestyle) — same effective
-        // ruleset (no renju constraints), just the legal value /move
-        // accepts.
-        rulePreference: swap2Mode ? 'freestyle' : null,
+        // Don't override — let background pick from gomokuRule /
+        // defaultRule (Freestyle / Standard / Renju). /swap2 already
+        // drove the opening; once we're past that, the user-chosen
+        // ruleset applies. Standard (rule 1) bans overline for both
+        // colours — match this to Playok if "no 6-in-a-row" mode.
+        rulePreference: null,
         platform: 'playok.com',
         isRetry: false,
       });
@@ -942,11 +1031,19 @@
 
     // Refresh manual playokUsername when settings change (user types
     // their username in extension options without reload).
+    let lastSeenRule = null;
+    let lastSeenUsername = null;
     try {
       chrome.storage.onChanged.addListener((changes, area) => {
-        if (area === 'local' && changes.boardMasterState) {
+        if (area !== 'local' || !changes.boardMasterState) return;
+        const newSt = changes.boardMasterState.newValue || {};
+        const newRule = newSt.gomokuRule || newSt.gomokuSettings?.defaultRule || 'freestyle';
+        const newUser = (newSt.gomokuSettings?.playokUsername || '').trim();
+
+        // Username changed → re-identify the user from scratch.
+        if (newUser !== lastSeenUsername) {
+          lastSeenUsername = newUser;
           refreshManualNameFromStorage();
-          // Force re-identification of user/side on next tick.
           userSide = '';
           userSideCandidate = '';
           userSideCandidateHits = 0;
@@ -954,6 +1051,25 @@
           headerSelectorWarned = false;
           prevSnapshotKey = '';
         }
+
+        // Rule changed mid-game → drop the stale hint and re-analyze
+        // immediately so the engine recomputes under the new ruleset
+        // (Standard bans overline, etc.).
+        if (lastSeenRule !== null && newRule !== lastSeenRule) {
+          console.log(TAG, 'rule changed:', lastSeenRule, '→', newRule, '— re-analyzing');
+          clearHighlight();
+          suggestedMove = null;
+          pendingMoves = [];
+          prevSnapshotKey = '';
+          analysisInFlight = false;
+        }
+        lastSeenRule = newRule;
+      });
+      // Seed initial values so the first real change is detected.
+      chrome.storage.local.get('boardMasterState', (r) => {
+        const st = r?.boardMasterState || {};
+        lastSeenRule = st.gomokuRule || st.gomokuSettings?.defaultRule || 'freestyle';
+        lastSeenUsername = (st.gomokuSettings?.playokUsername || '').trim();
       });
     } catch (_) {}
 
@@ -1032,6 +1148,9 @@
 
         case 'updateGomokuHints':
           analysisInFlight = false;
+          // Regular /move response → swap2 protocol is no longer
+          // active; clear any leftover protocol banner.
+          clearSwap2Banner();
           if (msg.turn) currentTurn = msg.turn;
           console.log(TAG, 'hint:', msg.move, 'turn:', currentTurn);
           if (msg.move && GRID &&
@@ -1054,6 +1173,8 @@
               if (!list.length) break;
               pendingMoves = list.slice();
               highlightCell(list[0].x, list[0].y);
+              showSwap2Banner('Swap2: place 3 opening stones (' +
+                list.length + ' to play)', '#1d4ed8');
               console.log(TAG, 'swap2 opening — place these 3 stones:',
                 list, '(highlighting first; queue will advance on each click)');
               if (autoMode) playPendingMoves();
@@ -1065,6 +1186,8 @@
               if (!list.length) break;
               pendingMoves = list.slice();
               highlightCell(list[0].x, list[0].y);
+              showSwap2Banner('Swap2: PLACE 2 balancing stones (chooser; ' +
+                'opp picks colour next)', '#7c3aed');
               console.log(TAG, 'swap2 put_two — place 2 balancing stones:',
                 list);
               if (autoMode) playPendingMoves();
@@ -1077,6 +1200,12 @@
               if (msg.move && GRID &&
                   msg.move.x < GRID.cols && msg.move.y < GRID.rows) {
                 highlightCell(msg.move.x, msg.move.y);
+                // At 3 stones (chooser): keep WHITE, play stone 4.
+                // At 5 stones (proposer): keep current colour, play stone 6.
+                const colourAdvice = (msg.stoneCount === 3)
+                  ? 'KEEP WHITE — play stone 4'
+                  : 'KEEP current colour — play next stone';
+                showSwap2Banner('Swap2: ' + colourAdvice, '#15803d');
                 console.log(TAG, 'swap2 move — keep colour, play:',
                   msg.move.x + ',' + msg.move.y);
                 if (autoMode) scheduleAutoPlay(msg.move.x, msg.move.y);
@@ -1089,6 +1218,12 @@
               // analyzeBoard's sideChanged path will mark the protocol
               // resolved. Either way we're done with /swap2.
               swap2OpeningResolved = true;
+              // At 3 stones (chooser): swap = take BLACK.
+              // At 5 stones (proposer): swap = take the other colour.
+              const colourAdvice = (msg.stoneCount === 3)
+                ? 'PICK BLACK — click "swap" on Playok'
+                : 'SWAP colours — click "swap" on Playok';
+              showSwap2Banner('Swap2: ' + colourAdvice, '#dc2626');
               console.log(TAG, 'swap2 SWAP — engine recommends taking the ' +
                 'opposite colour. Click the "swap" button on Playok' +
                 (autoMode ? ' (auto)' : ''));
@@ -1125,7 +1260,7 @@
 
         case 'toggleHints':
           hintsVisible = msg.visible !== undefined ? msg.visible : !hintsVisible;
-          if (!hintsVisible) clearHighlight();
+          if (!hintsVisible) { clearHighlight(); clearSwap2Banner(); }
           else if (suggestedMove) highlightCell(suggestedMove.x, suggestedMove.y);
           break;
 

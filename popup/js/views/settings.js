@@ -50,10 +50,13 @@ function renderSettings() {
             <span>▼</span>
           </button>
           <div class="dropdown-menu" id="settings-rule-menu">
-            ${['Freestyle', 'Standard Renju', 'Free Renju'].map(r => {
-              const key = r.toLowerCase();
-              const sel = gs.defaultRule === key ? ' selected' : '';
-              return `<div class="dropdown-item${sel}" data-srule="${key}"><span class="check">●</span> ${r}</div>`;
+            ${[
+              { key: 'freestyle', label: 'Freestyle (5+ wins)' },
+              { key: 'standard',  label: 'Standard (exactly 5, no overline)' },
+              { key: 'renju',     label: 'Renju (black restricted)' },
+            ].map(r => {
+              const sel = gs.defaultRule === r.key ? ' selected' : '';
+              return `<div class="dropdown-item${sel}" data-srule="${r.key}"><span class="check">●</span> ${r.label}</div>`;
             }).join('')}
           </div>
         </div>
@@ -79,9 +82,16 @@ function renderSettings() {
     }
     body.querySelectorAll('[data-srule]').forEach(item => {
       item.addEventListener('click', () => {
+        // Keep both fields in lockstep: defaultRule is the persisted
+        // setting, gomokuRule is the active session rule. Background
+        // reads gomokuRule first and would otherwise keep using its
+        // initial 'freestyle' value if the user only updated this
+        // settings page (a confusing dead-end).
         state.gomokuSettings.defaultRule = item.dataset.srule;
+        state.gomokuRule = item.dataset.srule;
         saveState();
         renderSettings();
+        sendToActiveTab({ command: 'getFEN' });
       });
     });
   }
