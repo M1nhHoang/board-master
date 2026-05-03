@@ -100,14 +100,29 @@
     let contextValid     = true;
     let currentTurn      = 'X';
     let userSide         = '';   // 'X' / 'O' — from .tplcont DOM
+    // Debounce userSide updates: Playok flickers panel colour-box
+    // and arrow state during game transitions (game over → new game),
+    // making detectPlayers().user.side flip X↔O every poll for a
+    // second or two. We require the new side to hold for 2 consecutive
+    // detections before committing — otherwise transient flickers can
+    // fire /swap2 with the wrong perspective.
+    let userSideCandidate     = '';
+    let userSideCandidateHits = 0;
+    const USERSIDE_STABLE_HITS = 2;
     let autoMode         = false;
     let autoTimerId      = null;
     let notifiedGameDetected = false;
 
     // Swap2 protocol state
-    let swap2Mode        = false; // mirror of gomokuSettings.swap2
-    let pendingMoves     = [];    // queued from /swap2 (opening = 3, put_two = 2)
-    let pendingTimerId   = null;
+    let swap2Mode             = false; // mirror of gomokuSettings.swap2
+    let pendingMoves          = [];    // queued from /swap2 (opening = 3, put_two = 2)
+    let pendingTimerId        = null;
+    // True once the swap2 opening protocol has been resolved (engine
+    // returned a final 'move'/'swap' decision OR opp swapped colours
+    // mid-opening, both of which mean we should switch from /swap2 to
+    // regular /move for the rest of the game). Reset when the board
+    // returns to 0 stones (a new game).
+    let swap2OpeningResolved  = false;
 
     function safeSendMessage(msg) {
       try { chrome.runtime.sendMessage(msg); }
@@ -185,13 +200,54 @@
     //   • a triangle div with border-bottom — visibility:inherit when it's
     //     that player's turn, hidden otherwise
     //
-    // To identify the local user, read the logged-in name from the page
-    // header (#appcont .nav0.usno.tama .msub) and match against the
-    // panel names — much more reliable than guessing by name colour.
+    // To identify the local user, read their logged-in name from the
+    // page header and match against panel names — the panels themselves
+    // contain no "this is you" marker. The header lives in different
+    // selectors across Playok versions, so try several. Final fallback
+    // is gomokuSettings.playokUsername which the user can configure
+    // manually when auto-detection fails.
+    let cachedManualName = null;
+    function refreshManualNameFromStorage() {
+      try {
+        chrome.storage.local.get('boardMasterState', (result) => {
+          const gs = result?.boardMasterState?.gomokuSettings || {};
+          const n = (gs.playokUsername || '').trim();
+          if (n !== cachedManualName) {
+            cachedManualName = n;
+            console.log(TAG, 'playokUsername (settings):', n || '(unset)');
+          }
+        });
+      } catch (_) {}
+    }
+    refreshManualNameFromStorage();
+
+    const HEADER_NAME_SELECTORS = [
+      '#appcont .nav0.usno.tama .msub',
+      '#appcont .usno .msub',
+      '#appcont .msub',
+      '.nav0 .msub',
+      '[class*="usno"] .msub',
+      '#hdcont .msub',
+      '.msub',
+    ];
+    let headerSelectorWarned = false;
     function getLoggedInName() {
-      const el = document.querySelector('#appcont .nav0.usno.tama .msub');
-      const t = el && el.textContent && el.textContent.trim();
-      return t || '';
+      // 1) Manual override always wins.
+      if (cachedManualName) return cachedManualName;
+      // 2) Try several header selectors — Playok's class names shift.
+      for (const sel of HEADER_NAME_SELECTORS) {
+        const el = document.querySelector(sel);
+        const t = el && el.textContent && el.textContent.trim();
+        if (t && t.length <= 40 && /^[A-Za-z0-9_-]+$/.test(t)) {
+          return t;
+        }
+      }
+      if (!headerSelectorWarned) {
+        headerSelectorWarned = true;
+        console.warn(TAG, 'could not locate logged-in name in header — set ' +
+          'gomokuSettings.playokUsername to override (chrome.storage.local)');
+      }
+      return '';
     }
 
     function detectPlayers() {
@@ -225,14 +281,44 @@
         candidates.push({ side, name, isActive, nameColor });
       });
 
-      // Primary: match logged-in name. Fallback: panel with default
-      // (non-grayed) name colour. Last resort: leftmost panel.
+      // Identify the local user. Strict ordering — if we can't tell
+      // confidently, return user=null so analyzeBoard refuses to
+      // operate (better than guessing the wrong perspective and
+      // calling /swap2 with inverted player codes).
+      //
+      // Header text often contains username + rating concatenated
+      // (e.g. ".msub" → "gmw343g1200" while the panel just shows
+      // "gmw343g"). Try exact match first, then prefix in either
+      // direction so "gmw343g1200" maps to panel "gmw343g".
+      //
+      // We DO NOT fall back to .nowrel `color: inherit`: that
+      // attribute tracks "is this player currently waiting" (Playok
+      // flips it between panels every move), not "is this you".
+      // Using it caused userSide to bounce X↔O each turn and the
+      // hint to flicker (force-re-analyze on every false flip).
       let user = null;
-      if (myName) user = candidates.find(c => c.name === myName) || null;
-      if (!user)  user = candidates.find(c => !c.nameColor || c.nameColor === 'inherit') || null;
-      if (!user && candidates.length) user = candidates[0];
-      const opponent = candidates.find(c => c !== user) || null;
-      return { user, opponent, turn, myName, candidates };
+      let userSource = null;
+      if (myName) {
+        user = candidates.find(c => c.name === myName) || null;
+        if (user) userSource = 'header-name';
+        if (!user) {
+          // Tolerate trailing rating / suffix on either side. Pick
+          // the longest matching candidate name to avoid partial
+          // collisions ("ab" vs "abcd" both prefixing "abcdef").
+          const prefixMatches = candidates.filter(c =>
+            c.name && (myName.startsWith(c.name) || c.name.startsWith(myName)));
+          if (prefixMatches.length === 1) {
+            user = prefixMatches[0];
+            userSource = 'header-prefix';
+          } else if (prefixMatches.length > 1) {
+            user = prefixMatches.sort((a, b) => b.name.length - a.name.length)[0];
+            userSource = 'header-prefix-longest';
+          }
+        }
+      }
+      // No reliable signal — DO NOT guess. Caller checks user==null.
+      const opponent = user ? (candidates.find(c => c !== user) || null) : null;
+      return { user, opponent, turn, myName, userSource, candidates };
     }
 
     // ─── Pixel readback ───
@@ -466,17 +552,96 @@
     // DOM signal for the opening phase.
 
     function analyzeBoard() {
-      if (!contextValid || analysisInFlight) return;
+      if (!contextValid) return;
+      if (analysisInFlight) {
+        // Heartbeat: warn every ~3s if analysisInFlight is stuck so we
+        // know an API call timed out without a response.
+        const _h = Date.now();
+        if (!analyzeBoard._stuckSince) analyzeBoard._stuckSince = _h;
+        else if (_h - analyzeBoard._stuckSince > 3000 &&
+                 (!analyzeBoard._lastStuckLog || _h - analyzeBoard._lastStuckLog > 3000)) {
+          analyzeBoard._lastStuckLog = _h;
+          console.warn(TAG, 'analysisInFlight stuck — waiting for engine response');
+        }
+        return;
+      }
+      analyzeBoard._stuckSince = 0;
       // (swap2 detection now runs from the poll tick — independent of
       //  analysisInFlight gating — so it always fires regardless of
       //  whether an in-flight analysis is stuck.)
       const playersForId = detectPlayers();
-      if (playersForId && !userSide && playersForId.user?.side) {
-        userSide = playersForId.user.side;
-        console.log(TAG, 'user side:', userSide,
-          '(' + playersForId.user.name + ' vs ' + (playersForId.opponent?.name || '?') + ')',
-          playersForId.myName ? '— matched header name' : '— fallback');
+      // Diagnostic: surface what detectPlayers is seeing, throttled to
+      // once every ~5s so the console isn't flooded but the user can
+      // tell at a glance whether we even see the player panels.
+      const _now = Date.now();
+      if (!analyzeBoard._lastDiagLog || _now - analyzeBoard._lastDiagLog > 5000) {
+        analyzeBoard._lastDiagLog = _now;
+        if (!playersForId) {
+          console.log(TAG, 'detectPlayers: .tplcont not in DOM yet');
+        } else {
+          console.log(TAG, 'detectPlayers:',
+            'user=' + (playersForId.user ? playersForId.user.name + '/' + playersForId.user.side : 'null'),
+            'src=' + (playersForId.userSource || '-'),
+            'turn=' + (playersForId.turn || '-'),
+            'myName=' + JSON.stringify(playersForId.myName || ''),
+            'candidates=' + JSON.stringify(playersForId.candidates.map(c =>
+              ({ name: c.name, side: c.side, active: c.isActive, nc: c.nameColor }))));
+        }
       }
+      // If detectPlayers can't confidently identify the user (e.g. the
+      // page header isn't where we expect AND the panel name colours
+      // don't disambiguate) refuse to operate. Calling the engine with
+      // a guessed perspective causes "engine plays for the opponent"
+      // bugs that are hard to recover from. Warn loudly so the user
+      // can copy a name into gomokuSettings.playokUsername.
+      if (playersForId && !playersForId.user && playersForId.candidates?.length >= 2) {
+        if (!analyzeBoard._lastUnidWarn || _now - analyzeBoard._lastUnidWarn > 5000) {
+          analyzeBoard._lastUnidWarn = _now;
+          const names = playersForId.candidates.map(c => c.name).join(' / ');
+          console.warn(TAG, 'cannot identify which panel is you. Players on board:',
+            names, '\nFix: paste this in the page console (replace YOUR_NAME):\n' +
+            "chrome.storage.local.get('boardMasterState',r=>{const s=r.boardMasterState||{};s.gomokuSettings={...(s.gomokuSettings||{}),playokUsername:'YOUR_NAME'};chrome.storage.local.set({boardMasterState:s})})");
+        }
+        return;
+      }
+      // Update userSide via debounce — swap2 'swap' actions flip
+      // colours mid-game without adding a stone, so a once-and-done
+      // cache goes stale and the engine receives moves with inverted
+      // OWN/OPPONENT codes. But raw frame-by-frame detection is
+      // also unreliable: during Playok's game-transition animations
+      // (game over → new game) the colour-box and arrow flicker
+      // X↔O every poll, which would otherwise fire spurious /swap2
+      // calls. Require N consecutive same-side detections before we
+      // commit a change.
+      const detectedSide = playersForId?.user?.side;
+      let sideChanged = false;
+      if (detectedSide && detectedSide !== userSide) {
+        if (userSideCandidate === detectedSide) {
+          userSideCandidateHits++;
+        } else {
+          userSideCandidate = detectedSide;
+          userSideCandidateHits = 1;
+        }
+        if (userSideCandidateHits >= USERSIDE_STABLE_HITS) {
+          if (!userSide) {
+            console.log(TAG, 'user side:', detectedSide,
+              '(' + playersForId.user.name + ' vs ' + (playersForId.opponent?.name || '?') + ')',
+              playersForId.myName ? '— matched header name' : '— fallback');
+          } else {
+            console.log(TAG, 'user side flipped (stable):', userSide, '→', detectedSide);
+            sideChanged = true;
+          }
+          userSide = detectedSide;
+          userSideCandidate = '';
+          userSideCandidateHits = 0;
+        }
+      } else if (userSideCandidate) {
+        // Detected side reverted to the committed value before stabilising
+        // — pure flicker, drop the candidate.
+        userSideCandidate = '';
+        userSideCandidateHits = 0;
+      }
+
 
       if (!GRID) detectGrid();
       if (!GRID) return;
@@ -484,8 +649,14 @@
       const snap = snapshotBoard();
       if (!snap) return;
 
-      const snapKey = JSON.stringify(snap);
-      if (snapKey === prevSnapshotKey) return;
+      // Include turn in the key so a silent turn-flip (e.g. swap2
+      // 'swap' action: colours change but no stone is added) still
+      // bumps the key and triggers a fresh analysis. Otherwise the
+      // canvas pixels are identical and analyzeBoard would return
+      // early forever after the swap.
+      const turnKey = playersForId?.turn || '';
+      const snapKey = JSON.stringify(snap) + '|t=' + turnKey + '|u=' + userSide;
+      if (!sideChanged && snapKey === prevSnapshotKey) return;
       prevSnapshotKey = snapKey;
 
       // Refresh once more (cheap) so the next-block check sees the latest
@@ -497,22 +668,72 @@
       const turn = players?.turn || ((x === o) ? 'X' : 'O');
       const moves = buildMovesFromBoard(snap);
 
+      // Reset swap2 protocol state on a fresh board (new game).
+      if (total === 0 && (swap2OpeningResolved || pendingMoves.length > 0)) {
+        console.log(TAG, 'swap2 protocol state reset (new game) — clearing',
+          pendingMoves.length, 'pending moves');
+        swap2OpeningResolved = false;
+        pendingMoves = [];
+      }
+      // A userSide flip is the signature of opp's swap2 'swap' action.
+      // Whatever stones we had queued were planned under the old colour
+      // assignment; they're no longer valid. Clear them and mark the
+      // protocol resolved so we use /move from now on (calling /swap2
+      // again post-swap would re-evaluate a decision opp already made).
+      if (sideChanged) {
+        if (pendingMoves.length > 0) {
+          console.log(TAG, 'side flip — discarding', pendingMoves.length,
+            'stale pending moves');
+          pendingMoves = [];
+        }
+        if (total > 0 && !swap2OpeningResolved) {
+          console.log(TAG, 'swap2 protocol resolved (mid-opening side flip)');
+          swap2OpeningResolved = true;
+        }
+      }
+
       clearHighlight();
       suggestedMove = null;
 
+      // If we have queued moves from a prior /swap2 result (opening = 3
+      // stones, put_two = 2 stones) and the user just placed one of
+      // them manually, advance to the next pending stone instead of
+      // re-querying the engine with /move (which can't see the
+      // opening intent and would suggest a different next stone).
+      if (pendingMoves.length > 0) {
+        pendingMoves = pendingMoves.filter(m =>
+          !snap[m.y] || snap[m.y][m.x] === 0);
+        if (pendingMoves.length > 0) {
+          const next = pendingMoves[0];
+          console.log(TAG, 'pending swap2 queue:', pendingMoves.length, 'left → hint',
+            next.x + ',' + next.y);
+          highlightCell(next.x, next.y);
+          return;
+        }
+      }
+
       // Swap2 protocol: only the /swap2 endpoint understands the
-      // proposer / chooser decisions. It accepts exactly 0, 3 or 5
-      // stones — outside those checkpoints, the regular /move
-      // endpoint with rule=6 (free-swap2) handles the in-between
-      // moves. We only call /swap2 when:
-      //   • swap2 mode is on
-      //   • stone count is 0 / 3 / 5 (a protocol decision point)
-      //   • it's the user's turn (DOM arrow on user's panel)
-      //   • we don't already have queued moves to play
+      // proposer / chooser decisions. The panel turn-arrow is the
+      // single source of truth for who acts at any moment — that
+      // already encodes "is it my turn to be the proposer/chooser?":
+      //   • 0 stones, arrow on me → I'm proposer (places opening 3).
+      //   • 3 stones, arrow on me → I'm chooser (deciding swap/play/put_two).
+      //   • 5 stones, arrow on me → I'm proposer (deciding swap/play after put_two).
+      //
+      // (Earlier code tried to derive "decider" from stone-colour
+      // counts, but at 3 stones the BWB opening always has 2 black +
+      // 1 white regardless of who placed them — the chooser's userStones
+      // is 1, not 0, so that heuristic blocked /swap2 incorrectly.)
       const isUserTurn = !!(players?.user?.isActive);
       const atDecisionPoint = [0, 3, 5].includes(total);
+      // While userSide is still being debounced (Playok mid-transition),
+      // refuse to fire /swap2 — the side reading isn't trustworthy yet
+      // and the wrong perspective would have the engine propose moves
+      // for the opposite player.
+      const sideStable = !userSideCandidate;
       const useSwap2 = swap2Mode && atDecisionPoint && isUserTurn &&
-                       pendingMoves.length === 0;
+                       pendingMoves.length === 0 && !swap2OpeningResolved &&
+                       sideStable;
 
       if (useSwap2) {
         console.log(TAG, 'swap2 decision point — stones:', total,
@@ -527,6 +748,19 @@
         return;
       }
 
+      // In swap2 mode during the opening phase (total < 6, before
+      // the protocol settles into regular play), if it's not our
+      // turn there's nothing useful to compute — opponent is acting,
+      // wait. Calling /move with rule=6 + 0/3/5 stones is also the
+      // wrong endpoint (Rapfi expects /swap2 there) and at 1/2/4
+      // stones during opening the position is in flux and the engine
+      // can't yet give a meaningful hint.
+      if (swap2Mode && total < 6 && !isUserTurn && !swap2OpeningResolved) {
+        console.log(TAG, 'swap2 wait — total:', total,
+          'userSide:', userSide || '(?)', '(opponent acting)');
+        return;
+      }
+
       console.log(TAG, 'board change — X:', x, 'O:', o, 'turn:', turn,
         swap2Mode ? '(swap2 mode)' : '');
 
@@ -535,10 +769,12 @@
         command: 'analyzeGomoku',
         boardSize: GRID.cols,
         moves, turn,
-        // During a swap2 game the regular /move calls (counts 1,2,4,>=6)
-        // should still use the swap2 rule code so renju constraints
-        // don't kick in. Background maps 'free-swap2' → 6.
-        rulePreference: swap2Mode ? 'free-swap2' : null,
+        // /move only accepts rule ∈ {0,1,2}; rule=6 (free-swap2) is
+        // /swap2-only. During a swap2 game's regular play (counts
+        // 1,2,4,≥6) we use rule=0 (freestyle) — same effective
+        // ruleset (no renju constraints), just the legal value /move
+        // accepts.
+        rulePreference: swap2Mode ? 'freestyle' : null,
         platform: 'playok.com',
         isRetry: false,
       });
@@ -704,6 +940,23 @@
       (document.head || document.documentElement).appendChild(style);
     }
 
+    // Refresh manual playokUsername when settings change (user types
+    // their username in extension options without reload).
+    try {
+      chrome.storage.onChanged.addListener((changes, area) => {
+        if (area === 'local' && changes.boardMasterState) {
+          refreshManualNameFromStorage();
+          // Force re-identification of user/side on next tick.
+          userSide = '';
+          userSideCandidate = '';
+          userSideCandidateHits = 0;
+          analyzeBoard._unidentifiedWarned = false;
+          headerSelectorWarned = false;
+          prevSnapshotKey = '';
+        }
+      });
+    } catch (_) {}
+
     // ─── Init flow ───
     function tryInit() {
       const c = findBoardCanvas();
@@ -795,29 +1048,51 @@
           pendingMoves = [];
           if (pendingTimerId) { clearTimeout(pendingTimerId); pendingTimerId = null; }
           switch (msg.action) {
-            case 'opening':    // 3 stones (proposer)
+            case 'opening': {  // 3 stones (proposer)
+              const list = (msg.moves || []).filter(m =>
+                GRID && m.x < GRID.cols && m.y < GRID.rows);
+              if (!list.length) break;
+              pendingMoves = list.slice();
+              highlightCell(list[0].x, list[0].y);
+              console.log(TAG, 'swap2 opening — place these 3 stones:',
+                list, '(highlighting first; queue will advance on each click)');
+              if (autoMode) playPendingMoves();
+              break;
+            }
             case 'put_two': {  // 2 balancing stones (chooser)
               const list = (msg.moves || []).filter(m =>
                 GRID && m.x < GRID.cols && m.y < GRID.rows);
               if (!list.length) break;
               pendingMoves = list.slice();
-              // Highlight the first stone as the immediate hint
               highlightCell(list[0].x, list[0].y);
+              console.log(TAG, 'swap2 put_two — place 2 balancing stones:',
+                list);
               if (autoMode) playPendingMoves();
               break;
             }
             case 'move': {     // engine keeps colour and plays one stone
+              // Engine returned a single concrete move = swap2 protocol
+              // is settled from here; switch to /move next time.
+              swap2OpeningResolved = true;
               if (msg.move && GRID &&
                   msg.move.x < GRID.cols && msg.move.y < GRID.rows) {
                 highlightCell(msg.move.x, msg.move.y);
+                console.log(TAG, 'swap2 move — keep colour, play:',
+                  msg.move.x + ',' + msg.move.y);
                 if (autoMode) scheduleAutoPlay(msg.move.x, msg.move.y);
               }
               break;
             }
             case 'swap': {     // engine wants to take the other colour
+              // Engine wants the swap. Once the user clicks the swap
+              // button (or autoMode does), the panel colours flip and
+              // analyzeBoard's sideChanged path will mark the protocol
+              // resolved. Either way we're done with /swap2.
+              swap2OpeningResolved = true;
+              console.log(TAG, 'swap2 SWAP — engine recommends taking the ' +
+                'opposite colour. Click the "swap" button on Playok' +
+                (autoMode ? ' (auto)' : ''));
               if (autoMode) clickSwapButton();
-              else console.log(TAG, 'engine suggests SWAP — click "swap" '
-                + 'on playok or enable auto-play to do it automatically');
               break;
             }
             default:

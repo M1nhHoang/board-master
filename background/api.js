@@ -17,6 +17,16 @@ export async function analyzePosition(fen, settings) {
   return resp.json();
 }
 
+async function readErrorBody(resp) {
+  try {
+    const text = await resp.text();
+    try {
+      const j = JSON.parse(text);
+      return j.error || j.message || text;
+    } catch { return text; }
+  } catch { return ''; }
+}
+
 export async function analyzeGomokuPosition(boardSize, rule, moves, maxDepth) {
   const body = { boardSize, rule, moves };
   if (maxDepth) body.maxDepth = maxDepth;
@@ -26,7 +36,12 @@ export async function analyzeGomokuPosition(boardSize, rule, moves, maxDepth) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  if (!resp.ok) throw new Error(`Gomoku API error: ${resp.status}`);
+  if (!resp.ok) {
+    const detail = await readErrorBody(resp);
+    console.error('[BM][api] /move', resp.status, '— request:', JSON.stringify(body),
+      '— response:', detail);
+    throw new Error(`Gomoku API ${resp.status}: ${detail || 'no body'}`);
+  }
   return resp.json();
 }
 
@@ -42,6 +57,11 @@ export async function analyzeGomokuSwap2(boardSize, moves, maxDepth) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  if (!resp.ok) throw new Error(`Gomoku swap2 API error: ${resp.status}`);
+  if (!resp.ok) {
+    const detail = await readErrorBody(resp);
+    console.error('[BM][api] /swap2', resp.status, '— request:', JSON.stringify(body),
+      '— response:', detail);
+    throw new Error(`Gomoku swap2 API ${resp.status}: ${detail || 'no body'}`);
+  }
   return resp.json();
 }
