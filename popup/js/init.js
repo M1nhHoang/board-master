@@ -127,7 +127,8 @@ async function init() {
     }
 
     const url = tab.url;
-    const isChessSite = url.includes('chess.com') || url.includes('lichess.org');
+    const isPlayokChess = /https:\/\/www\.playok\.com\/[^/]+\/chess(\/|$|#|\?)/i.test(url);
+    const isChessSite = url.includes('chess.com') || url.includes('lichess.org') || isPlayokChess;
     const isFacebookCaro = url.includes('facebook.com/gaming/play/');
     const isPlayokGomoku = /https:\/\/www\.playok\.com\/[^/]+\/gomoku(\/|$|#|\?)/i.test(url);
     const isGomokuSite = isFacebookCaro || isPlayokGomoku;
@@ -184,7 +185,9 @@ async function init() {
 
       state.connected = true;
       state.gameType = 'chess';
-      state.platform = url.includes('chess.com') ? 'chess.com' : 'lichess.org';
+      state.platform = url.includes('chess.com') ? 'chess.com'
+                     : url.includes('lichess.org') ? 'lichess.org'
+                     : 'playok.com';
       saveState();
       navigateTo('main');
     } else {

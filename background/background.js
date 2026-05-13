@@ -213,7 +213,8 @@ async function ensureContentScripts(tabId, url) {
   const lichessMatch  = url.startsWith('https://lichess.org/');
   const facebookCaroMatch = (url.includes('facebook.com') && url.includes('/gaming/play/')) || url.includes('fbsbx.com');
   const playokGomokuMatch = /^https:\/\/www\.playok\.com\/[^/]+\/gomoku(\/|$|#|\?)/i.test(url);
-  if (!chessComMatch && !lichessMatch && !facebookCaroMatch && !playokGomokuMatch) return false;
+  const playokChessMatch  = /^https:\/\/www\.playok\.com\/[^/]+\/chess(\/|$|#|\?)/i.test(url);
+  if (!chessComMatch && !lichessMatch && !facebookCaroMatch && !playokGomokuMatch && !playokChessMatch) return false;
 
   try {
     // Test if content script is already there
@@ -229,6 +230,11 @@ async function ensureContentScripts(tabId, url) {
       await chrome.scripting.executeScript({
         target: { tabId, allFrames: facebookCaroMatch },
         files: ['content/gomoku.js'],
+      });
+    } else if (playokChessMatch) {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        files: ['content/chess/playok-chess.js'],
       });
     } else {
       // Inject the page-world FEN reader for chess.com

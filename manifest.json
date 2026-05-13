@@ -47,6 +47,10 @@
       "js": ["content/chess/arrows.js", "content/chess/core.js", "content/chess/lichess.js"]
     },
     {
+      "matches": ["https://www.playok.com/*"],
+      "js": ["content/chess/playok-chess.js"]
+    },
+    {
       "matches": ["https://www.playok.com/*", "https://www.xiangqi.com/*"],
       "js": ["content/xiangqi.js"]
     },
@@ -63,7 +67,10 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["content/gomoku-playok-debug.js"],
+      "resources": [
+        "content/gomoku-playok-debug.js",
+        "content/chess/playok-chess-debug.js"
+      ],
       "matches": ["https://www.playok.com/*"]
     }
   ],
