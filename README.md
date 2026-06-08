@@ -229,8 +229,9 @@ Analyze a chess position with Stockfish.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `fen` | string | Yes | Board position in FEN notation |
-| `depth` | number | No | Search depth (1–15, default 12) |
-| `multiPV` | number | No | Number of lines to return (1–3) |
+| `moves` | string[] | No | UCI moves from the start position. Max 600 entries (`400` if exceeded) |
+| `depth` | number | No | Search depth (default 12). Effective 1–15; up to 50 accepted but capped to 15; outside 1–50 → `400` |
+| `multiPV` | number | No | Lines to return (default 1). Effective 1–3; up to 10 accepted but capped to 3; outside 1–10 → `400` |
 | `skillLevel` | number | No | Engine skill level (0–20) |
 
 **Response:**
@@ -266,10 +267,10 @@ Analyze a gomoku position.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `boardSize` | number | Yes | Board dimension (square) |
+| `boardSize` | number | Yes | Board dimension (square), 10–22 |
 | `rule` | number | No | 0 = freestyle, 1 = standard renju, 2 = free renju |
-| `moves` | array | Yes | List of `{ x, y, player }` stones |
-| `maxDepth` | number | No | Search depth (default 10) |
+| `moves` | array | Yes | List of `{ x, y, player }` stones. Max `boardSize²` entries (`400` if exceeded) |
+| `maxDepth` | number | No | Search depth (default 10). Effective 1–15; up to 50 accepted but capped to 15; outside 1–50 → `400` |
 
 **Response:**
 
@@ -280,6 +281,24 @@ Analyze a gomoku position.
   "engineTime": 62
 }
 ```
+
+### Errors & Rate Limiting
+
+Both `/move` endpoints share one engine queue and the same limits:
+
+| Status | When |
+|--------|------|
+| `400` | Bad input (FEN / moves, `depth`/`maxDepth`/`multiPV` out of range, or `moves` over the cap) |
+| `408` | Waited more than 30 s in the queue |
+| `413` | Request body larger than 32 KB |
+| `429` | Per-IP rate limit (120/min), 5 pending requests for this IP, or the global queue (50) is full |
+| `500` | Engine error / no legal move. Message is generic (`"Engine temporarily unavailable"`); details are logged server-side only |
+
+- **120 requests/min per IP** across all `/api` routes (configurable via `API_RATE_LIMIT`)
+- Max **5 pending requests** per IP, and at most **50** queued requests globally
+- Requests idle **> 30 s** in the queue time out (`408`); the engine auto-stops after **60 s** idle
+- The engine runs as a **single, single-threaded process** — requests are queued and served sequentially
+- `5xx` responses never leak internal details (engine paths, stack traces); `4xx` return their specific message
 
 ---
 
